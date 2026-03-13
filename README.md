@@ -1,126 +1,152 @@
 # ⚡ InotiTidy
 
-**InotiTidy** is a professional, high-performance Linux system daemon written in Go. It monitors your directories (like `Downloads` or `Desktop`) using the kernel's **inotify** subsystem and automatically sorts incoming files into their designated folders based on real-time events.
+**InotiTidy** is a Linux daemon written in Go that automatically sorts files from selected folders (for example, `Downloads` and `Desktop`) into destination directories by extension rules from config.
 
-No more manual cleaning. No more cluttered "Downloads" folders. Just pure, automated order.
-
----
-
-## 🌟 Why InotiTidy?
-
-Most file organizers use "Cron jobs" that scan folders every hour, killing your disk I/O. **InotiTidy is different.**
-
-* **Event-Driven (Zero Idle Load):** It sits silently in the background and only wakes up when the Linux kernel notifies it of a new file.
-* **Race Condition Protection:** It polls file sizes before moving. If a file is still being downloaded or copied, InotiTidy waits until the transfer is 100% complete.
-* **Blazing Fast:** Built with Go's concurrency model. It handles hundreds of file events simultaneously without breaking a sweat.
-* **Native Systemd Integration:** Designed to run as a robust background service that starts automatically on boot.
+It is designed to run as a `systemd` service and continuously scan watched folders on a short interval.
 
 ---
 
-## 🏗️ Technical Architecture
+## 🌟 Current behavior (important)
 
-InotiTidy follows the **Clean Architecture** pattern to ensure maintainability:
+In the current implementation, InotiTidy:
 
-* **`cmd/`**: The entry point. Manages application lifecycle and OS signals (Graceful Shutdown).
-* **`internal/config`**: Handles YAML parsing, path normalization (e.g., converting `~` to absolute paths), and validation.
-* **`internal/watcher`**: The core engine. Implements the `fsnotify` loop and the logic for atomic file operations.
+- Uses a **polling watcher** (directory scan every ~1 second), not `inotify/fsnotify`.
+- Waits until a file size becomes stable before moving it (helps avoid moving incomplete downloads/copies).
+- Ignores files containing configured exclude keywords (case-insensitive).
+- Routes files by extension rules using case-insensitive suffix matching (supports multi-part extensions like `.tar.gz`).
+- Avoids overwrite conflicts by appending a Unix timestamp to the filename.
+
+---
+
+## 🏗️ Project structure
+
+- `cmd/inotitidy/main.go` — app entrypoint, startup/shutdown lifecycle.
+- `internal/config` — config loading, `~` expansion, and built-in parser for supported config format.
+- `internal/watcher` — polling loop, stability check, filtering, and file move logic.
+- `install.sh` — install helper: build binary, place config, generate/restart `systemd` service.
+- `config.yaml` — default config template copied on first install.
 
 ---
 
 ## 🚀 Installation
 
-### 1. Prerequisites
+## 1) Prerequisites
 
-* A Linux distribution with `systemd`.
-* [Go 1.21+](https://www.google.com/search?q=https://go.dev/doc/install) installed and configured in your `$PATH`.
+- Linux with `systemd`
+- Go `1.21+`
+- `sudo` access for service installation into `/etc/systemd/system`
 
-### 2. One-Command Setup
-
-Clone the repository and run the automated installer:
+## 2) Install command
 
 ```bash
-git clone https://github.com/yourusername/InotiTidy.git
-cd InotiTidy
-make install
-
+sudo make install
 ```
 
-**What the installer does:**
+What this does:
 
-1. Compiles the Go source code into a native binary.
-2. Moves the binary to `~/.local/bin/`.
-3. Initializes a default configuration in `~/.config/inotitidy/config.yaml`.
-4. Generates and registers a `systemd` service for your user.
-5. Starts the service immediately.
+1. Builds `inotitidy`.
+2. Detects target user (`SUDO_USER` fallback to `USER`) and uses that user home.
+3. Copies binary to `~/.local/bin/inotitidy` (for target user).
+4. Creates `~/.config/inotitidy/config.yaml` if missing.
+5. Writes system service file `/etc/systemd/system/inotitidy.service` with `User=<target-user>`.
+6. Runs `systemctl daemon-reload`, `enable`, and `restart` for `inotitidy.service`.
 
 ---
 
 ## ⚙️ Configuration
 
-The logic of the "Janitor" is controlled entirely via `~/.config/inotitidy/config.yaml`.
+Config path:
+
+```text
+~/.config/inotitidy/config.yaml
+```
+
+Example (supported by current parser):
 
 ```yaml
-# Directories to monitor for new files
 watch_directories:
   - "~/Downloads"
   - "~/Desktop"
 
-# Global filters: If a filename contains these (case-insensitive), it is ignored
 exclude_keywords:
   - "KEEP"
   - "IMPORTANT"
-  - "DIPLOM"
 
-# Routing rules
 rules:
-  - extensions: [".pdf", ".docx", ".txt"]
-    target: "~/Documents/Work"
-  
-  - extensions: [".jpg", ".png", ".svg"]
-    target: "~/Pictures/Media"
-    
-  - extensions: [".mp3", ".flac"]
-    target: "~/Music/Library"
+  - extensions: [".pdf", ".doc", ".docx", ".txt"]
+    target: "~/Documents"
 
-  - extensions: [".zip", ".tar.gz", ".rar"]
+  - extensions: [".jpg", ".jpeg", ".png", ".gif"]
+    target: "~/Pictures"
+
+  - extensions: [".mp3", ".wav", ".flac"]
+    target: "~/Music"
+
+  - extensions: [".zip", ".tar", ".gz", ".tar.gz", ".rar"]
     target: "~/Downloads/Archives"
+```
 
+### Notes
+
+- `watch_directories` is required.
+- `~` in paths is expanded to current user home at runtime.
+- Rule extensions are matched by filename suffix, case-insensitive.
+
+---
+
+## 🧰 Service management
+
+Because installer creates a **system** service, use:
+
+```bash
+sudo systemctl status inotitidy.service
+sudo systemctl restart inotitidy.service
+sudo systemctl stop inotitidy.service
+sudo journalctl -u inotitidy.service -f
 ```
 
 ---
 
-## 📊 Management & Logs
+## 🔍 Troubleshooting
 
-Since InotiTidy runs as a `systemd` unit, you manage it using standard Linux commands:
+### Service logs show `/root/Downloads` or `/root/Desktop`
 
-| Action | Command |
-| --- | --- |
-| **Check Status** | `systemctl --user status inotitidy` |
-| **View Live Logs** | `journalctl --user -u inotitidy -f` |
-| **Restart (Apply Config)** | `systemctl --user restart inotitidy` |
-| **Stop Service** | `systemctl --user stop inotitidy` |
+Usually this means the service runs as `root` or config points to root home.
+
+Checklist:
+
+1. Reinstall using `sudo make install` from your normal user.
+2. Verify service user:
+   ```bash
+   systemctl cat inotitidy.service | grep '^User='
+   ```
+3. Verify config path/content for that same user:
+   ```bash
+   cat ~/.config/inotitidy/config.yaml
+   ```
+4. Restart service after config changes:
+   ```bash
+   sudo systemctl restart inotitidy.service
+   ```
+
+### "Error reading <dir>: no such file or directory"
+
+Create missing watch directories or update `watch_directories` in config.
 
 ---
 
-## 🧠 Advanced Features Explained
+## 🧪 Local development
 
-### Smart Move Logic
-
-If a file with the same name already exists in the target directory, InotiTidy won't overwrite it. It automatically appends a Unix timestamp to the filename (e.g., `report.pdf` becomes `report_1710321456.pdf`).
-
-### Integrity Check
-
-To prevent moving "ghost" or "empty" files, the daemon monitors the file size over a short period. It only triggers the move once the file size stabilizes, ensuring your downloads are finished.
+```bash
+make build
+go test ./...
+```
 
 ---
 
 ## 🤝 Contributing
 
-1. Fork the Project.
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`).
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`).
-4. Push to the Branch (`git push origin feature/AmazingFeature`).
-5. Open a Pull Request.
-
----
-
+1. Fork repository
+2. Create feature branch
+3. Commit changes
+4. Open PR
