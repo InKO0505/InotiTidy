@@ -3,9 +3,11 @@ package main
 import (
 	"InotiTidy/internal/config"
 	"InotiTidy/internal/watcher"
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -59,7 +61,7 @@ func handleTUI() error {
 		SetChangedFunc(func() {
 			app.Draw()
 		})
-	logView.SetBorder(true).SetTitle(" [white::b]Live Activity Feed[-:-:-] ")
+	logView.SetBorder(true).SetTitle(" [white::b]System Service Logs (journalctl)[-:-:-] ")
 	logView.SetBackgroundColor(tcell.NewHexColor(0x16161e))
 
 	logToUI := func(msg string) {
@@ -68,49 +70,125 @@ func handleTUI() error {
 		logView.ScrollToEnd()
 	}
 
-	// --- Watcher Instance ---
-	var cancelWatcher context.CancelFunc
-	var isRunning bool
-	watcherApp := &watcher.App{
-		Config: cfg,
-		Logger: logToUI,
+	// --- Service Helpers ---
+	isServiceActive := func() bool {
+		cmd := exec.Command("systemctl", "is-active", "--quiet", "inotitidy.service")
+		err := cmd.Run()
+		return err == nil
 	}
-	watcherApp.LoadStats()
+
+	stopJournalOnce := func() {} // To be assigned later for log piping
 
 	// --- Dashboard Stats Refresh ---
 	var updateDashboard func()
 
 	startWatcher := func() {
-		if isRunning {
-			return
+		logToUI("[yellow]Attempting to start systemd service...[-]")
+		// Use pkexec for graphical password prompt to avoid breaking TUI focus
+		cmd := exec.Command("pkexec", "systemctl", "start", "inotitidy.service")
+		if err := cmd.Run(); err != nil {
+			// Fallback to sudo just in case pkexec isn't available, though it might still have focus issues
+			logToUI("[yellow]pkexec failed, trying sudo...[-]")
+			cmd = exec.Command("sudo", "systemctl", "start", "inotitidy.service")
+			_ = cmd.Run()
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		cancelWatcher = cancel
-		isRunning = true
-
-		go func() {
-			if err := watcherApp.Start(ctx); err != nil {
-				logToUI(fmt.Sprintf("[red]Watcher Error: %v[-]", err))
-			}
-			isRunning = false
-			app.QueueUpdateDraw(func() {
-				updateDashboard()
-			})
-		}()
-		updateDashboard()
-		logToUI("[#9ece6a]Service started manually from TUI[-]")
+		logToUI("[#9ece6a]Service start command sent[-]")
+		app.QueueUpdateDraw(func() { updateDashboard() })
 	}
 
 	stopWatcher := func() {
-		if !isRunning {
-			return
+		logToUI("[yellow]Attempting to stop systemd service...[-]")
+		cmd := exec.Command("pkexec", "systemctl", "stop", "inotitidy.service")
+		if err := cmd.Run(); err != nil {
+			logToUI("[yellow]pkexec failed, trying sudo...[-]")
+			cmd = exec.Command("sudo", "systemctl", "stop", "inotitidy.service")
+			_ = cmd.Run()
 		}
-		if cancelWatcher != nil {
-			cancelWatcher()
+		logToUI("[#f7768e]Service stop command sent[-]")
+		app.QueueUpdateDraw(func() { updateDashboard() })
+	}
+
+	// --- Log Piping (Journalctl) ---
+	go func() {
+		for {
+			ctx, cancel := context.WithCancel(context.Background())
+			stopJournalOnce = cancel
+			
+			cmd := exec.CommandContext(ctx, "journalctl", "-u", "inotitidy.service", "-f", "-n", "20", "--no-hostname")
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			if err := cmd.Start(); err != nil {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			scanner := bufio.NewScanner(stdout)
+			for scanner.Scan() {
+				line := scanner.Text()
+				// Clean up journalctl output a bit if needed
+				app.QueueUpdateDraw(func() {
+					fmt.Fprintf(logView, "[#a9b1d6]%s[-]\n", line)
+					logView.ScrollToEnd()
+				})
+			}
+			cancel()
+			time.Sleep(2 * time.Second) // Wait before retry if crashed
 		}
-		isRunning = false
-		updateDashboard()
-		logToUI("[#f7768e]Service stopped manually from TUI[-]")
+	}()
+
+	// --- Service Installation ---
+	installService := func() {
+		exePath, _ := os.Executable()
+		absExePath, _ := filepath.Abs(exePath)
+		
+		serviceContent := fmt.Sprintf(`[Unit]
+Description=InotiTidy File Organizer
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%s --daemon
+Restart=always
+User=%s
+
+[Install]
+WantedBy=multi-user.target
+`, absExePath, os.Getenv("USER"))
+
+		tmpPath := "/tmp/inotitidy.service"
+		os.WriteFile(tmpPath, []byte(serviceContent), 0644)
+
+		modal := tview.NewModal().
+			SetText("Install inotitidy.service to /etc/systemd/system/?\n(Requires sudo)").
+			AddButtons([]string{"Install", "Cancel"}).
+			SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+				if buttonLabel == "Install" {
+					logToUI("[yellow]Asking for permission to install service...[-]")
+					// Copying with pkexec for GUI prompt
+					cmd := exec.Command("pkexec", "cp", tmpPath, "/etc/systemd/system/inotitidy.service")
+					if err := cmd.Run(); err == nil {
+						exec.Command("pkexec", "systemctl", "daemon-reload").Run()
+						logToUI("[#9ece6a]Service installed successfully![-]")
+					} else {
+						logToUI("[yellow]pkexec failed, trying sudo...[-]")
+						cmd = exec.Command("sudo", "cp", tmpPath, "/etc/systemd/system/inotitidy.service")
+						if err := cmd.Run(); err == nil {
+							exec.Command("sudo", "systemctl", "daemon-reload").Run()
+							logToUI("[#9ece6a]Service installed successfully via sudo![-]")
+						} else {
+							logToUI(fmt.Sprintf("[red]Installation failed: %v[-]", err))
+						}
+					}
+				}
+				rootPages.RemovePage("InstallModal")
+			})
+		modal.SetBackgroundColor(bgPanel).SetTextColor(fgPrimary)
+		rootPages.AddPage("InstallModal", modal, true, true)
+		app.SetFocus(modal)
 	}
 
 	// --- Directory Picker Component ---
@@ -166,12 +244,16 @@ func handleTUI() error {
 
 	// --- Dashboard Construction ---
 	createDashboard := func() *tview.Flex {
+		isRunning := isServiceActive()
 		statusText := "[#f7768e]STOPPED[-]"
 		if isRunning {
 			statusText = "[#9ece6a]RUNNING[-]"
 		}
 
-		// Stats
+		// Stats (Still from watcherApp for now)
+		watcherApp := &watcher.App{Config: cfg}
+		watcherApp.LoadStats()
+		
 		mostCommon := "N/A"
 		maxCount := 0
 		for ext, count := range watcherApp.Stats.ExtensionCounts {
@@ -192,14 +274,18 @@ func handleTUI() error {
 		info := tview.NewTextView().
 			SetDynamicColors(true).
 			SetTextAlign(tview.AlignCenter).
-			SetText(fmt.Sprintf("\n[white::b]Service Status:[-] %s\n\n[#a9b1d6]Manage the background sorting process and view stats.[-]", statusText))
+			SetText(fmt.Sprintf("\n[white::b]System Service Status:[-] %s\n\n[#a9b1d6]Manage the background systemd service.[-]", statusText))
 
 		actions := tview.NewList().
-			AddItem("Start Service", "Run background monitor", '1', startWatcher).
-			AddItem("Stop Service", "Halt background monitor", '2', stopWatcher).
-			AddItem("Clean All Now", "Process all files in watched folders", '3', func() {
-				go watcherApp.ScanAll()
-				logToUI("[#bb9af7]Full scan initiated...[-]")
+			AddItem("Start Service", "sudo systemctl start", '1', startWatcher).
+			AddItem("Stop Service", "sudo systemctl stop", '2', stopWatcher).
+			AddItem("Install/Setup Service", "Create inotitidy.service", 'i', installService).
+			AddItem("Clean All Now", "Process files manually in TUI", '3', func() {
+				go func() {
+					logToUI("[#bb9af7]Manually triggered clean (Internal)...[-]")
+					w := &watcher.App{Config: cfg, Logger: logToUI}
+					w.ScanAll()
+				}()
 			})
 		actions.SetSelectedBackgroundColor(bgPanel).SetSelectedTextColor(cyanColor)
 		actions.SetMainTextColor(fgPrimary).SetSecondaryTextColor(fgSecondary)
@@ -207,7 +293,7 @@ func handleTUI() error {
 		flex := tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(statsView, 3, 1, false).
 			AddItem(info, 4, 1, false).
-			AddItem(actions, 7, 1, true).
+			AddItem(actions, 9, 1, true).
 			AddItem(tview.NewBox(), 1, 0, false).
 			AddItem(logView, 0, 2, false)
 
@@ -392,11 +478,9 @@ func handleTUI() error {
 			if err := cfg.Save(config.GetConfigPath()); err != nil {
 				modal.SetText(fmt.Sprintf("Error saving configuration:\n%v", err)).
 					AddButtons([]string{"OK"})
-				logToUI(fmt.Sprintf("[red]Save Error: %v[-]", err))
 			} else {
-				modal.SetText("Configuration saved successfully!\n\n(Press any key to close)").
+				modal.SetText("Configuration saved successfully!\n\nDon't forget to restart service to apply changes.\n\n(Press any key to close)").
 					AddButtons([]string{"OK"})
-				logToUI("[#9ece6a]Configuration saved![-]")
 			}
 			modal.SetBackgroundColor(bgPanel).SetTextColor(fgPrimary)
 			modal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
@@ -410,7 +494,7 @@ func handleTUI() error {
 			app.SetFocus(modal)
 		}).
 		AddItem("Quit", "Exit app", 'q', func() {
-			stopWatcher()
+			stopJournalOnce()
 			app.Stop()
 		})
 
@@ -433,7 +517,7 @@ func handleTUI() error {
 	header := tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft).
-		SetText("  [#bb9af7::b]⚡ InotiTidy Advanced Console[-:-:-] [#565f89]v1.2[-:-:-]")
+		SetText("  [#bb9af7::b]⚡ InotiTidy System Console[-:-:-] [#565f89]v1.5[-:-:-]")
 
 	footer := tview.NewTextView().
 		SetDynamicColors(true).
@@ -459,8 +543,6 @@ func handleTUI() error {
 	mainFlex.SetBackgroundColor(bgBody)
 	rootPages.AddPage("Main", mainFlex, true, true)
 	
-	startWatcher()
-
 	app.SetRoot(rootPages, true).EnableMouse(true)
 	return app.Run()
 }
