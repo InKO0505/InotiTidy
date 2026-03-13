@@ -33,7 +33,7 @@ After=local-fs.target
 [Service]
 User=$TARGET_USER
 WorkingDirectory=$CFG_DIR
-ExecStart=$BIN_DIR/$BIN_NAME
+ExecStart=$BIN_DIR/$BIN_NAME --daemon
 Restart=always
 RestartSec=5
 

@@ -72,9 +72,57 @@ func handleTUI() error {
 
 	// --- Service Helpers ---
 	isServiceActive := func() bool {
-		cmd := exec.Command("systemctl", "is-active", "--quiet", "inotitidy.service")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "inotitidy.service")
 		err := cmd.Run()
-		return err == nil
+		return err == nil && ctx.Err() == nil
+	}
+
+	runWithElevation := func(commandName string, args ...string) error {
+		type runner struct {
+			name    string
+			args    []string
+			label   string
+			timeout time.Duration
+		}
+
+		runners := []runner{
+			{name: "pkexec", args: append([]string{commandName}, args...), label: "pkexec", timeout: 8 * time.Second},
+			{name: "sudo", args: append([]string{"-n", commandName}, args...), label: "sudo", timeout: 5 * time.Second},
+			{name: commandName, args: args, label: "direct", timeout: 5 * time.Second},
+		}
+
+		var errors []string
+		for _, r := range runners {
+			if _, err := exec.LookPath(r.name); err != nil {
+				errors = append(errors, fmt.Sprintf("%s unavailable", r.label))
+				continue
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+			cmd := exec.CommandContext(ctx, r.name, r.args...)
+			out, err := cmd.CombinedOutput()
+			cancel()
+
+			if err == nil {
+				return nil
+			}
+
+			outStr := strings.TrimSpace(string(out))
+			if ctx.Err() == context.DeadlineExceeded {
+				errors = append(errors, fmt.Sprintf("%s timed out", r.label))
+				continue
+			}
+			if outStr == "" {
+				errors = append(errors, fmt.Sprintf("%s: %v", r.label, err))
+			} else {
+				errors = append(errors, fmt.Sprintf("%s: %v (%s)", r.label, err, outStr))
+			}
+		}
+
+		return fmt.Errorf("%s", strings.Join(errors, "; "))
 	}
 
 	runWithElevation := func(commandName string, args ...string) error {
@@ -123,35 +171,55 @@ func handleTUI() error {
 	var updateDashboard func()
 
 	startWatcher := func() {
-		logToUI("[yellow]Attempting to start systemd service...[-]")
-		if err := runWithElevation("systemctl", "start", "inotitidy.service"); err != nil {
-			logToUI(fmt.Sprintf("[red]Service failed to start: %v[-]", err))
-			app.QueueUpdateDraw(func() { updateDashboard() })
-			return
-		}
+		go func() {
+			app.QueueUpdateDraw(func() {
+				logToUI("[yellow]Attempting to start systemd service...[-]")
+			})
 
-		if isServiceActive() {
-			logToUI("[#9ece6a]Service started successfully[-]")
-		} else {
-			logToUI("[yellow]Start command ran, but service is still not active. Check journal logs.[-]")
-		}
-		app.QueueUpdateDraw(func() { updateDashboard() })
+			if err := runWithElevation("systemctl", "start", "inotitidy.service"); err != nil {
+				app.QueueUpdateDraw(func() {
+					logToUI(fmt.Sprintf("[red]Service failed to start: %v[-]", err))
+					updateDashboard()
+				})
+				return
+			}
+
+			serviceActive := isServiceActive()
+			app.QueueUpdateDraw(func() {
+				if serviceActive {
+					logToUI("[#9ece6a]Service started successfully[-]")
+				} else {
+					logToUI("[yellow]Start command ran, but service is still not active. Check journal logs.[-]")
+				}
+				updateDashboard()
+			})
+		}()
 	}
 
 	stopWatcher := func() {
-		logToUI("[yellow]Attempting to stop systemd service...[-]")
-		if err := runWithElevation("systemctl", "stop", "inotitidy.service"); err != nil {
-			logToUI(fmt.Sprintf("[red]Service failed to stop: %v[-]", err))
-			app.QueueUpdateDraw(func() { updateDashboard() })
-			return
-		}
+		go func() {
+			app.QueueUpdateDraw(func() {
+				logToUI("[yellow]Attempting to stop systemd service...[-]")
+			})
 
-		if isServiceActive() {
-			logToUI("[yellow]Stop command ran, but service is still active.[-]")
-		} else {
-			logToUI("[#f7768e]Service stopped successfully[-]")
-		}
-		app.QueueUpdateDraw(func() { updateDashboard() })
+			if err := runWithElevation("systemctl", "stop", "inotitidy.service"); err != nil {
+				app.QueueUpdateDraw(func() {
+					logToUI(fmt.Sprintf("[red]Service failed to stop: %v[-]", err))
+					updateDashboard()
+				})
+				return
+			}
+
+			serviceActive := isServiceActive()
+			app.QueueUpdateDraw(func() {
+				if serviceActive {
+					logToUI("[yellow]Stop command ran, but service is still active.[-]")
+				} else {
+					logToUI("[#f7768e]Service stopped successfully[-]")
+				}
+				updateDashboard()
+			})
+		}()
 	}
 
 	// --- Log Piping (Journalctl) ---
@@ -181,7 +249,15 @@ func handleTUI() error {
 					logView.ScrollToEnd()
 				})
 			}
+
+			if err := scanner.Err(); err != nil {
+				app.QueueUpdateDraw(func() {
+					logToUI(fmt.Sprintf("[yellow]journalctl stream interrupted: %v[-]", err))
+				})
+			}
+
 			cancel()
+			_ = cmd.Wait()
 			time.Sleep(2 * time.Second) // Wait before retry if crashed
 		}
 	}()
@@ -216,20 +292,29 @@ WantedBy=multi-user.target
 			AddButtons([]string{"Install", "Cancel"}).
 			SetDoneFunc(func(buttonIndex int, buttonLabel string) {
 				if buttonLabel == "Install" {
-					logToUI("[yellow]Asking for permission to install service...[-]")
-					if err := runWithElevation("cp", tmpPath, "/etc/systemd/system/inotitidy.service"); err != nil {
-						logToUI(fmt.Sprintf("[red]Installation failed: %v[-]", err))
-						rootPages.RemovePage("InstallModal")
-						return
-					}
+					go func() {
+						app.QueueUpdateDraw(func() {
+							logToUI("[yellow]Asking for permission to install service...[-]")
+						})
+						if err := runWithElevation("cp", tmpPath, "/etc/systemd/system/inotitidy.service"); err != nil {
+							app.QueueUpdateDraw(func() {
+								logToUI(fmt.Sprintf("[red]Installation failed: %v[-]", err))
+							})
+							return
+						}
 
-					if err := runWithElevation("systemctl", "daemon-reload"); err != nil {
-						logToUI(fmt.Sprintf("[red]Service copied but daemon-reload failed: %v[-]", err))
-						rootPages.RemovePage("InstallModal")
-						return
-					}
+						if err := runWithElevation("systemctl", "daemon-reload"); err != nil {
+							app.QueueUpdateDraw(func() {
+								logToUI(fmt.Sprintf("[red]Service copied but daemon-reload failed: %v[-]", err))
+							})
+							return
+						}
 
-					logToUI("[#9ece6a]Service installed and daemon reloaded successfully[-]")
+						app.QueueUpdateDraw(func() {
+							logToUI("[#9ece6a]Service installed and daemon reloaded successfully[-]")
+							updateDashboard()
+						})
+					}()
 				}
 				rootPages.RemovePage("InstallModal")
 			})
@@ -329,8 +414,12 @@ WantedBy=multi-user.target
 			AddItem("Install/Setup Service", "Create inotitidy.service", 'i', installService).
 			AddItem("Clean All Now", "Process files manually in TUI", '3', func() {
 				go func() {
-					logToUI("[#bb9af7]Manually triggered clean (Internal)...[-]")
-					w := &watcher.App{Config: cfg, Logger: logToUI}
+					app.QueueUpdateDraw(func() {
+						logToUI("[#bb9af7]Manually triggered clean (Internal)...[-]")
+					})
+					w := &watcher.App{Config: cfg, Logger: func(msg string) {
+						app.QueueUpdateDraw(func() { logToUI(msg) })
+					}}
 					w.ScanAll()
 				}()
 			})
