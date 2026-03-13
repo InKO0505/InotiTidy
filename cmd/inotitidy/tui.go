@@ -72,9 +72,12 @@ func handleTUI() error {
 
 	// --- Service Helpers ---
 	isServiceActive := func() bool {
-		cmd := exec.Command("systemctl", "is-active", "--quiet", "inotitidy.service")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "inotitidy.service")
 		err := cmd.Run()
-		return err == nil
+		return err == nil && ctx.Err() == nil
 	}
 
 	runWithElevation := func(commandName string, args ...string) error {
@@ -206,7 +209,15 @@ func handleTUI() error {
 					logView.ScrollToEnd()
 				})
 			}
+
+			if err := scanner.Err(); err != nil {
+				app.QueueUpdateDraw(func() {
+					logToUI(fmt.Sprintf("[yellow]journalctl stream interrupted: %v[-]", err))
+				})
+			}
+
 			cancel()
+			_ = cmd.Wait()
 			time.Sleep(2 * time.Second) // Wait before retry if crashed
 		}
 	}()
