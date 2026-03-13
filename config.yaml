@@ -1,0 +1,20 @@
+watch_directories:
+  - "~/Downloads"
+  - "~/Desktop"
+
+exclude_keywords:
+  - "KEEP"
+  - "IMPORTANT"
+  - "DIPLOM"
+
+rules:
+  - extensions: [".pdf", ".doc", ".docx", ".txt"]
+    target: "~/Documents"
+  - extensions: [".jpg", ".jpeg", ".png", ".gif"]
+    target: "~/Pictures"
+  - extensions: [".mp3", ".wav", ".flac"]
+    target: "~/Music"
+  - extensions: [".mp4", ".mkv", ".mov"]
+    target: "~/Videos"
+  - extensions: [".zip", ".tar", ".gz", ".rar"]
+    target: "~/Downloads/Archives"
