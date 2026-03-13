@@ -10,6 +10,11 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "tui" || os.Args[1] == "config") {
+		handleTUI()
+		return
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Critical: failed to load config: %v", err)

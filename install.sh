@@ -13,7 +13,7 @@ BIN_DIR="$TARGET_HOME/.local/bin"
 CFG_DIR="$TARGET_HOME/.config/inotitidy"
 SERVICE_FILE="/etc/systemd/system/inotitidy.service"
 
-go build -o "$BIN_NAME" cmd/inotitidy/main.go
+go build -o "$BIN_NAME" ./cmd/inotitidy
 
 mkdir -p "$BIN_DIR"
 mkdir -p "$CFG_DIR"

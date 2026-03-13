@@ -19,10 +19,60 @@ type Config struct {
 	Rules     []Rule   `yaml:"rules"`
 }
 
-func Load() (*Config, error) {
+func GetConfigPath() string {
 	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, ".config/inotitidy/config.yaml")
-	return LoadFromPath(path)
+	return filepath.Join(home, ".config/inotitidy/config.yaml")
+}
+
+func Load() (*Config, error) {
+	return LoadFromPath(GetConfigPath())
+}
+
+func (c *Config) Save(path string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	var sb strings.Builder
+
+	sb.WriteString("watch_directories:\n")
+	for _, dir := range c.WatchDirs {
+		dir = strings.Replace(dir, home, "~", 1)
+		sb.WriteString(fmt.Sprintf("  - %q\n", dir))
+	}
+	sb.WriteString("\n")
+
+	if len(c.Excludes) > 0 {
+		sb.WriteString("exclude_keywords:\n")
+		for _, kw := range c.Excludes {
+			sb.WriteString(fmt.Sprintf("  - %q\n", kw))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(c.Rules) > 0 {
+		sb.WriteString("rules:\n")
+		for _, rule := range c.Rules {
+			sb.WriteString("  - extensions: [")
+			for i, ext := range rule.Extensions {
+				sb.WriteString(fmt.Sprintf("%q", ext))
+				if i < len(rule.Extensions)-1 {
+					sb.WriteString(", ")
+				}
+			}
+			sb.WriteString("]\n")
+			target := strings.Replace(rule.Target, home, "~", 1)
+			sb.WriteString(fmt.Sprintf("    target: %q\n", target))
+		}
+	}
+
+	err = os.MkdirAll(filepath.Dir(path), 0755)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, []byte(sb.String()), 0644)
 }
 
 func LoadFromPath(path string) (*Config, error) {
