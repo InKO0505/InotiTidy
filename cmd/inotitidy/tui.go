@@ -125,47 +125,7 @@ func handleTUI() error {
 		return fmt.Errorf("%s", strings.Join(errors, "; "))
 	}
 
-	runWithElevation := func(commandName string, args ...string) error {
-		type runner struct {
-			name  string
-			args  []string
-			label string
-		}
-
-		runners := []runner{
-			{name: "pkexec", args: append([]string{commandName}, args...), label: "pkexec"},
-			{name: "sudo", args: append([]string{commandName}, args...), label: "sudo"},
-			{name: commandName, args: args, label: "direct"},
-		}
-
-		var errors []string
-		for _, r := range runners {
-			if _, err := exec.LookPath(r.name); err != nil {
-				errors = append(errors, fmt.Sprintf("%s unavailable", r.label))
-				continue
-			}
-
-			cmd := exec.Command(r.name, r.args...)
-			out, err := cmd.CombinedOutput()
-			if err == nil {
-				if r.label != "direct" {
-					logToUI(fmt.Sprintf("[#7dcfff]%s command succeeded[-]", r.label))
-				}
-				return nil
-			}
-
-			outStr := strings.TrimSpace(string(out))
-			if outStr == "" {
-				errors = append(errors, fmt.Sprintf("%s: %v", r.label, err))
-			} else {
-				errors = append(errors, fmt.Sprintf("%s: %v (%s)", r.label, err, outStr))
-			}
-		}
-
-		return fmt.Errorf("%s", strings.Join(errors, "; "))
-	}
-
-	stopJournalOnce := func() {} // To be assigned later for log piping
+	var stopJournalOnce = func() {} // To be assigned later for log piping
 
 	// --- Dashboard Stats Refresh ---
 	var updateDashboard func()
