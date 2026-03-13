@@ -21,6 +21,7 @@ func handleTUI() error {
 	}
 
 	app := tview.NewApplication()
+	rootPages := tview.NewPages()
 
 	// Tokyo Night Colors
 	bgBody := tcell.NewHexColor(0x1a1b26)
@@ -383,23 +384,30 @@ func handleTUI() error {
 		}).
 		AddItem("Save Config", "Write to disk", 's', func() {
 			modal := tview.NewModal()
+			dismiss := func() {
+				rootPages.RemovePage("SaveModal")
+				app.SetFocus(sidebar)
+			}
+
 			if err := cfg.Save(config.GetConfigPath()); err != nil {
 				modal.SetText(fmt.Sprintf("Error saving configuration:\n%v", err)).
-					AddButtons([]string{"OK"}).
-					SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-						mainPages.RemovePage("SaveModal")
-					})
+					AddButtons([]string{"OK"})
 				logToUI(fmt.Sprintf("[red]Save Error: %v[-]", err))
 			} else {
-				modal.SetText("Configuration saved successfully!").
-					AddButtons([]string{"Awesome"}).
-					SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-						mainPages.RemovePage("SaveModal")
-					})
+				modal.SetText("Configuration saved successfully!\n\n(Press any key to close)").
+					AddButtons([]string{"OK"})
 				logToUI("[#9ece6a]Configuration saved![-]")
 			}
 			modal.SetBackgroundColor(bgPanel).SetTextColor(fgPrimary)
-			mainPages.AddPage("SaveModal", modal, true, true)
+			modal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+				dismiss()
+			})
+			modal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+				dismiss()
+				return nil
+			})
+			rootPages.AddPage("SaveModal", modal, true, true)
+			app.SetFocus(modal)
 		}).
 		AddItem("Quit", "Exit app", 'q', func() {
 			stopWatcher()
@@ -449,8 +457,10 @@ func handleTUI() error {
 		AddItem(tview.NewBox(), 1, 0, false)
 
 	mainFlex.SetBackgroundColor(bgBody)
+	rootPages.AddPage("Main", mainFlex, true, true)
+	
 	startWatcher()
 
-	app.SetRoot(mainFlex, true).EnableMouse(true)
+	app.SetRoot(rootPages, true).EnableMouse(true)
 	return app.Run()
 }
