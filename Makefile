@@ -4,7 +4,7 @@ build:
 	go build -o $(BINARY) cmd/inotitidy/main.go
 
 install: build
-	./install.sh
+	bash ./install.sh
 
 clean:
 	rm -f $(BINARY)
