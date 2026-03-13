@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/fsnotify/fsnotify"
 )
 
 type App struct {
@@ -17,59 +15,61 @@ type App struct {
 }
 
 func (a *App) Start() error {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return err
-	}
-	defer watcher.Close()
-
-	go func() {
-		for {
-			select {
-			case event, ok := <-watcher.Events:
-				if !ok { return }
-				if event.Op&fsnotify.Create == fsnotify.Create {
-					a.handleEvent(event.Name)
-				}
-			case err, ok := <-watcher.Errors:
-				if !ok { return }
-				log.Println("Watcher error:", err)
-			}
-		}
-	}()
-
-	for _, dir := range a.Config.WatchDirs {
-		if err := watcher.Add(dir); err != nil {
-			log.Printf("Error watching %s: %v", dir, err)
-		}
-	}
+	seen := make(map[string]struct{})
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 
 	log.Println("InotiTidy started successfully")
-	select {} 
+	for {
+		for _, dir := range a.Config.WatchDirs {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				log.Printf("Error reading %s: %v", dir, err)
+				continue
+			}
+
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				path := filepath.Join(dir, entry.Name())
+				if _, ok := seen[path]; ok {
+					continue
+				}
+				seen[path] = struct{}{}
+				a.handleEvent(path)
+			}
+		}
+		<-ticker.C
+	}
 }
 
 func (a *App) handleEvent(path string) {
-	
 	var prevSize int64 = -1
 	for {
 		stat, err := os.Stat(path)
-		if err != nil { return }
-		if stat.Size() == prevSize { break }
+		if err != nil {
+			return
+		}
+		if stat.Size() == prevSize {
+			break
+		}
 		prevSize = stat.Size()
 		time.Sleep(500 * time.Millisecond)
 	}
 
 	fileName := filepath.Base(path)
+	upperName := strings.ToUpper(fileName)
 	for _, key := range a.Config.Excludes {
-		if strings.Contains(strings.ToUpper(fileName), strings.ToUpper(key)) {
+		if strings.Contains(upperName, strings.ToUpper(key)) {
 			return
 		}
 	}
 
-	ext := strings.ToLower(filepath.Ext(fileName))
+	lowerName := strings.ToLower(fileName)
 	for _, rule := range a.Config.Rules {
 		for _, e := range rule.Extensions {
-			if e == ext {
+			if strings.HasSuffix(lowerName, strings.ToLower(e)) {
 				a.move(path, rule.Target, fileName)
 				return
 			}
@@ -78,7 +78,7 @@ func (a *App) handleEvent(path string) {
 }
 
 func (a *App) move(src, targetDir, name string) {
-	os.MkdirAll(targetDir, 0755)
+	_ = os.MkdirAll(targetDir, 0o755)
 	dest := filepath.Join(targetDir, name)
 
 	if _, err := os.Stat(dest); err == nil {
