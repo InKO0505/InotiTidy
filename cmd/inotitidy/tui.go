@@ -47,7 +47,7 @@ func handleTUI() error {
 	tview.Styles.ContrastSecondaryTextColor = fgAccent
 
 	mainPages := tview.NewPages()
-	
+
 	sidebar := tview.NewList().ShowSecondaryText(true)
 	sidebar.SetBorder(true).SetTitle(" [white::b]Main Menu[-:-:-] ")
 	sidebar.SetSelectedBackgroundColor(bgPanel).SetSelectedTextColor(cyanColor)
@@ -77,6 +77,46 @@ func handleTUI() error {
 		return err == nil
 	}
 
+	runWithElevation := func(commandName string, args ...string) error {
+		type runner struct {
+			name  string
+			args  []string
+			label string
+		}
+
+		runners := []runner{
+			{name: "pkexec", args: append([]string{commandName}, args...), label: "pkexec"},
+			{name: "sudo", args: append([]string{commandName}, args...), label: "sudo"},
+			{name: commandName, args: args, label: "direct"},
+		}
+
+		var errors []string
+		for _, r := range runners {
+			if _, err := exec.LookPath(r.name); err != nil {
+				errors = append(errors, fmt.Sprintf("%s unavailable", r.label))
+				continue
+			}
+
+			cmd := exec.Command(r.name, r.args...)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				if r.label != "direct" {
+					logToUI(fmt.Sprintf("[#7dcfff]%s command succeeded[-]", r.label))
+				}
+				return nil
+			}
+
+			outStr := strings.TrimSpace(string(out))
+			if outStr == "" {
+				errors = append(errors, fmt.Sprintf("%s: %v", r.label, err))
+			} else {
+				errors = append(errors, fmt.Sprintf("%s: %v (%s)", r.label, err, outStr))
+			}
+		}
+
+		return fmt.Errorf("%s", strings.Join(errors, "; "))
+	}
+
 	stopJournalOnce := func() {} // To be assigned later for log piping
 
 	// --- Dashboard Stats Refresh ---
@@ -84,27 +124,33 @@ func handleTUI() error {
 
 	startWatcher := func() {
 		logToUI("[yellow]Attempting to start systemd service...[-]")
-		// Use pkexec for graphical password prompt to avoid breaking TUI focus
-		cmd := exec.Command("pkexec", "systemctl", "start", "inotitidy.service")
-		if err := cmd.Run(); err != nil {
-			// Fallback to sudo just in case pkexec isn't available, though it might still have focus issues
-			logToUI("[yellow]pkexec failed, trying sudo...[-]")
-			cmd = exec.Command("sudo", "systemctl", "start", "inotitidy.service")
-			_ = cmd.Run()
+		if err := runWithElevation("systemctl", "start", "inotitidy.service"); err != nil {
+			logToUI(fmt.Sprintf("[red]Service failed to start: %v[-]", err))
+			app.QueueUpdateDraw(func() { updateDashboard() })
+			return
 		}
-		logToUI("[#9ece6a]Service start command sent[-]")
+
+		if isServiceActive() {
+			logToUI("[#9ece6a]Service started successfully[-]")
+		} else {
+			logToUI("[yellow]Start command ran, but service is still not active. Check journal logs.[-]")
+		}
 		app.QueueUpdateDraw(func() { updateDashboard() })
 	}
 
 	stopWatcher := func() {
 		logToUI("[yellow]Attempting to stop systemd service...[-]")
-		cmd := exec.Command("pkexec", "systemctl", "stop", "inotitidy.service")
-		if err := cmd.Run(); err != nil {
-			logToUI("[yellow]pkexec failed, trying sudo...[-]")
-			cmd = exec.Command("sudo", "systemctl", "stop", "inotitidy.service")
-			_ = cmd.Run()
+		if err := runWithElevation("systemctl", "stop", "inotitidy.service"); err != nil {
+			logToUI(fmt.Sprintf("[red]Service failed to stop: %v[-]", err))
+			app.QueueUpdateDraw(func() { updateDashboard() })
+			return
 		}
-		logToUI("[#f7768e]Service stop command sent[-]")
+
+		if isServiceActive() {
+			logToUI("[yellow]Stop command ran, but service is still active.[-]")
+		} else {
+			logToUI("[#f7768e]Service stopped successfully[-]")
+		}
 		app.QueueUpdateDraw(func() { updateDashboard() })
 	}
 
@@ -113,7 +159,7 @@ func handleTUI() error {
 		for {
 			ctx, cancel := context.WithCancel(context.Background())
 			stopJournalOnce = cancel
-			
+
 			cmd := exec.CommandContext(ctx, "journalctl", "-u", "inotitidy.service", "-f", "-n", "20", "--no-hostname")
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {
@@ -144,7 +190,7 @@ func handleTUI() error {
 	installService := func() {
 		exePath, _ := os.Executable()
 		absExePath, _ := filepath.Abs(exePath)
-		
+
 		serviceContent := fmt.Sprintf(`[Unit]
 Description=InotiTidy File Organizer
 After=network.target
@@ -160,7 +206,10 @@ WantedBy=multi-user.target
 `, absExePath, os.Getenv("USER"))
 
 		tmpPath := "/tmp/inotitidy.service"
-		os.WriteFile(tmpPath, []byte(serviceContent), 0644)
+		if err := os.WriteFile(tmpPath, []byte(serviceContent), 0644); err != nil {
+			logToUI(fmt.Sprintf("[red]Failed to prepare service file: %v[-]", err))
+			return
+		}
 
 		modal := tview.NewModal().
 			SetText("Install inotitidy.service to /etc/systemd/system/?\n(Requires sudo)").
@@ -168,21 +217,19 @@ WantedBy=multi-user.target
 			SetDoneFunc(func(buttonIndex int, buttonLabel string) {
 				if buttonLabel == "Install" {
 					logToUI("[yellow]Asking for permission to install service...[-]")
-					// Copying with pkexec for GUI prompt
-					cmd := exec.Command("pkexec", "cp", tmpPath, "/etc/systemd/system/inotitidy.service")
-					if err := cmd.Run(); err == nil {
-						exec.Command("pkexec", "systemctl", "daemon-reload").Run()
-						logToUI("[#9ece6a]Service installed successfully![-]")
-					} else {
-						logToUI("[yellow]pkexec failed, trying sudo...[-]")
-						cmd = exec.Command("sudo", "cp", tmpPath, "/etc/systemd/system/inotitidy.service")
-						if err := cmd.Run(); err == nil {
-							exec.Command("sudo", "systemctl", "daemon-reload").Run()
-							logToUI("[#9ece6a]Service installed successfully via sudo![-]")
-						} else {
-							logToUI(fmt.Sprintf("[red]Installation failed: %v[-]", err))
-						}
+					if err := runWithElevation("cp", tmpPath, "/etc/systemd/system/inotitidy.service"); err != nil {
+						logToUI(fmt.Sprintf("[red]Installation failed: %v[-]", err))
+						rootPages.RemovePage("InstallModal")
+						return
 					}
+
+					if err := runWithElevation("systemctl", "daemon-reload"); err != nil {
+						logToUI(fmt.Sprintf("[red]Service copied but daemon-reload failed: %v[-]", err))
+						rootPages.RemovePage("InstallModal")
+						return
+					}
+
+					logToUI("[#9ece6a]Service installed and daemon reloaded successfully[-]")
 				}
 				rootPages.RemovePage("InstallModal")
 			})
@@ -195,13 +242,13 @@ WantedBy=multi-user.target
 	showDirPicker := func(onSelect func(string)) {
 		currentPath, _ := os.Getwd()
 		list := tview.NewList()
-		
+
 		var updateList func(string)
 		updateList = func(targetPath string) {
 			list.Clear()
 			currentPath = targetPath
 			list.SetTitle(fmt.Sprintf(" [white::b]Select Directory:[-] %s ", currentPath))
-			
+
 			list.AddItem(".. [Select Parent]", "", '.', func() {
 				updateList(filepath.Dir(currentPath))
 			})
@@ -216,7 +263,7 @@ WantedBy=multi-user.target
 					})
 				}
 			}
-			
+
 			list.AddItem("[#9ece6a]SELECT THIS DIRECTORY[-]", "Choose current path", 's', func() {
 				onSelect(currentPath)
 				mainPages.RemovePage("Picker")
@@ -229,7 +276,7 @@ WantedBy=multi-user.target
 		updateList(currentPath)
 		list.SetBorder(true)
 		list.SetSelectedBackgroundColor(bgPanel).SetSelectedTextColor(cyanColor)
-		
+
 		modal := tview.NewFlex().
 			AddItem(nil, 0, 1, false).
 			AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
@@ -253,7 +300,7 @@ WantedBy=multi-user.target
 		// Stats (Still from watcherApp for now)
 		watcherApp := &watcher.App{Config: cfg}
 		watcherApp.LoadStats()
-		
+
 		mostCommon := "N/A"
 		maxCount := 0
 		for ext, count := range watcherApp.Stats.ExtensionCounts {
@@ -311,7 +358,7 @@ WantedBy=multi-user.target
 		list := tview.NewList()
 		list.SetBorder(true).SetTitle(" [white::b]Watch Directories[-:-:-] ")
 		list.SetSelectedBackgroundColor(bgPanel).SetSelectedTextColor(fgAccent)
-		
+
 		for i, dir := range cfg.WatchDirs {
 			idx := i
 			list.AddItem(dir, "Enter/Digit to remove", rune(49+i), func() {
@@ -321,7 +368,7 @@ WantedBy=multi-user.target
 				app.SetFocus(mainPages)
 			})
 		}
-		list.AddItem("Browse & Add Directory", "Use picker to add new path", 'a', func() { 
+		list.AddItem("Browse & Add Directory", "Use picker to add new path", 'a', func() {
 			showDirPicker(func(path string) {
 				cfg.WatchDirs = append(cfg.WatchDirs, path)
 				populateMainPages()
@@ -346,8 +393,8 @@ WantedBy=multi-user.target
 				app.SetFocus(mainPages)
 			})
 		}
-		list.AddItem("Add New Keyword", "Press 'a' or Enter to add", 'a', func() { 
-			mainPages.SwitchToPage("AddExcForm") 
+		list.AddItem("Add New Keyword", "Press 'a' or Enter to add", 'a', func() {
+			mainPages.SwitchToPage("AddExcForm")
 			app.SetFocus(mainPages)
 		})
 		return list
@@ -368,7 +415,7 @@ WantedBy=multi-user.target
 				app.SetFocus(mainPages)
 			})
 		}
-		list.AddItem("Add New Rule", "Press 'a' or Enter to add", 'a', func() { 
+		list.AddItem("Add New Rule", "Press 'a' or Enter to add", 'a', func() {
 			mainPages.SwitchToPage("AddRuleForm")
 			app.SetFocus(mainPages)
 		})
@@ -542,7 +589,7 @@ WantedBy=multi-user.target
 
 	mainFlex.SetBackgroundColor(bgBody)
 	rootPages.AddPage("Main", mainFlex, true, true)
-	
+
 	app.SetRoot(rootPages, true).EnableMouse(true)
 	return app.Run()
 }
