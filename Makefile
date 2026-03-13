@@ -1,7 +1,7 @@
 BINARY=inotitidy
 
 build:
-	go build -o $(BINARY) cmd/inotitidy/main.go
+	go build -o $(BINARY) ./cmd/inotitidy
 
 install: build
 	bash ./install.sh

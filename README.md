@@ -1,152 +1,89 @@
 # ⚡ InotiTidy
 
-**InotiTidy** is a Linux daemon written in Go that automatically sorts files from selected folders (for example, `Downloads` and `Desktop`) into destination directories by extension rules from config.
+**InotiTidy** is a modern file organizer for Linux. It combines a powerful background file sorter with a premium "Tokyo Night" themed Management Console. 
 
-It is designed to run as a `systemd` service and continuously scan watched folders on a short interval.
-
----
-
-## 🌟 Current behavior (important)
-
-In the current implementation, InotiTidy:
-
-- Uses a **polling watcher** (directory scan every ~1 second), not `inotify/fsnotify`.
-- Waits until a file size becomes stable before moving it (helps avoid moving incomplete downloads/copies).
-- Ignores files containing configured exclude keywords (case-insensitive).
-- Routes files by extension rules using case-insensitive suffix matching (supports multi-part extensions like `.tar.gz`).
-- Avoids overwrite conflicts by appending a Unix timestamp to the filename.
+With InotiTidy, you don't need to manually configure YAML files or manage complex `systemd` services — everything is handled directly from the terminal interface.
 
 ---
 
-## 🏗️ Project structure
+## 🌟 Features
 
-- `cmd/inotitidy/main.go` — app entrypoint, startup/shutdown lifecycle.
-- `internal/config` — config loading, `~` expansion, and built-in parser for supported config format.
-- `internal/watcher` — polling loop, stability check, filtering, and file move logic.
-- `install.sh` — install helper: build binary, place config, generate/restart `systemd` service.
-- `config.yaml` — default config template copied on first install.
+- **Unified Management Console**: Start, stop, and monitor your file sorting service from a single dashboard.
+- **Instant Event Watching**: Powered by `fsnotify` for immediate, low-CPU file detection.
+- **Advanced Management Console**: Unified dashboard for everything.
+- **Statistics Tracker**: Real-time counters for total files sorted, daily progress, and top extensions.
+- **Smart Directory Picker**: Browse and select folders visually—no more manual path typing.
+- **Bulk Cleanup**: A "Clean All Now" button to instantly sort all legacy files in watched folders.
+- **Persistent Stats**: Statistics are saved to `stats.json` and persist across restarts.
+- **Premium Tokyo Night Theme**: A beautiful, high-contrast terminal interface.
+- **Intelligent Sorting**: Moves files based on extensions only after they stop growing (safe for large downloads).
+- **Custom Filters**: Exclude files by keywords and map specific extensions to target folders.
+- **Conflict Management**: Automatically handles filename collisions by appending timestamps.
 
 ---
 
-## 🚀 Installation
+## 🚀 Getting Started
 
-## 1) Prerequisites
-
-- Linux with `systemd`
+### 1) Prerequisites
+- Linux
 - Go `1.21+`
-- `sudo` access for service installation into `/etc/systemd/system`
 
-## 2) Install command
+### 2) Build & Launch
+To get the latest version of InotiTidy running:
 
 ```bash
-sudo make install
+# Build the project
+make build
+
+# Launch the Management Console
+./inotitidy
 ```
-
-What this does:
-
-1. Builds `inotitidy`.
-2. Detects target user (`SUDO_USER` fallback to `USER`) and uses that user home.
-3. Copies binary to `~/.local/bin/inotitidy` (for target user).
-4. Creates `~/.config/inotitidy/config.yaml` if missing.
-5. Writes system service file `/etc/systemd/system/inotitidy.service` with `User=<target-user>`.
-6. Runs `systemctl daemon-reload`, `enable`, and `restart` for `inotitidy.service`.
 
 ---
 
-## ⚙️ Configuration
+## ⚙️ How to Use (TUI Console)
 
-Config path:
+Once you launch `./inotitidy`, you'll enter the **Management Console**.
 
-```text
-~/.config/inotitidy/config.yaml
-```
+### The Dashboard
+- **Start/Stop Service**: Use the buttons on the dashboard to control the background file monitor.
+- **Service Status**: Instantly see if the sorter is active (`RUNNING`) or inactive (`STOPPED`).
+- **Activity Log**: Watch the bottom pane for live feedback on files being moved.
 
-Example (supported by current parser):
+### Configuration Sections
+- **Watch Directories**: Add/remove folders you want the app to monitor (e.g., `~/Downloads`).
+- **Exclude Keywords**: Define words that, if found in a filename, will cause it to be ignored.
+- **Routing Rules**: Map extensions (e.g., `.pdf`, `.jpg`) to destination folders.
 
-```yaml
-watch_directories:
-  - "~/Downloads"
-  - "~/Desktop"
-
-exclude_keywords:
-  - "KEEP"
-  - "IMPORTANT"
-
-rules:
-  - extensions: [".pdf", ".doc", ".docx", ".txt"]
-    target: "~/Documents"
-
-  - extensions: [".jpg", ".jpeg", ".png", ".gif"]
-    target: "~/Pictures"
-
-  - extensions: [".mp3", ".wav", ".flac"]
-    target: "~/Music"
-
-  - extensions: [".zip", ".tar", ".gz", ".tar.gz", ".rar"]
-    target: "~/Downloads/Archives"
-```
-
-### Notes
-
-- `watch_directories` is required.
-- `~` in paths is expanded to current user home at runtime.
-- Rule extensions are matched by filename suffix, case-insensitive.
+### Console Navigation
+- **Arrows (↑/↓)**: Navigate through lists and menus.
+- **Tab**: Switch focus between the **Sidebar** and the **Main Area**.
+- **Enter**: Confirm an action, edit a field, or "focus" into a list.
+- **Esc**: Return focus to the Sidebar or cancel a form.
+- **q / Ctrl+C**: Stop the service and exit the console.
 
 ---
 
-## 🧰 Service management
+## 🧪 Development & Manual Build
 
-Because installer creates a **system** service, use:
-
+If you are working on the code, you can run the console directly from source:
 ```bash
-sudo systemctl status inotitidy.service
-sudo systemctl restart inotitidy.service
-sudo systemctl stop inotitidy.service
-sudo journalctl -u inotitidy.service -f
+go run ./cmd/inotitidy
 ```
 
 ---
 
 ## 🔍 Troubleshooting
 
-### Service logs show `/root/Downloads` or `/root/Desktop`
+### Changes don't apply immediately?
+If you add new Watch Directories or Rules while the service is **RUNNING**, you should **Stop** and then **Start** the service again via the Dashboard to reload the new configuration.
 
-Usually this means the service runs as `root` or config points to root home.
-
-Checklist:
-
-1. Reinstall using `sudo make install` from your normal user.
-2. Verify service user:
-   ```bash
-   systemctl cat inotitidy.service | grep '^User='
-   ```
-3. Verify config path/content for that same user:
-   ```bash
-   cat ~/.config/inotitidy/config.yaml
-   ```
-4. Restart service after config changes:
-   ```bash
-   sudo systemctl restart inotitidy.service
-   ```
-
-### "Error reading <dir>: no such file or directory"
-
-Create missing watch directories or update `watch_directories` in config.
-
----
-
-## 🧪 Local development
-
-```bash
-make build
-go test ./...
-```
+### Where is the config file?
+InotiTidy saves all settings to `~/.config/inotitidy/config.yaml`. The TUI manages this file for you automatically.
 
 ---
 
 ## 🤝 Contributing
-
-1. Fork repository
-2. Create feature branch
-3. Commit changes
-4. Open PR
+1. Fork it.
+2. Create your feature branch.
+3. Open a Pull Request!

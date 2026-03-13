@@ -3,30 +3,31 @@ package main
 import (
 	"InotiTidy/internal/config"
 	"InotiTidy/internal/watcher"
+	"context"
+	"flag"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
 )
 
 func main() {
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatalf("Critical: failed to load config: %v", err)
+	daemon := flag.Bool("daemon", false, "Run as a background daemon")
+	flag.Parse()
+
+	if *daemon {
+		cfg, err := config.Load()
+		if err != nil {
+			log.Fatalf("Failed to load config for daemon: %v", err)
+		}
+		
+		w := &watcher.App{Config: cfg}
+		log.Println("InotiTidy starting in daemon mode...")
+		if err := w.Start(context.Background()); err != nil {
+			log.Fatalf("Daemon error: %v", err)
+		}
+		return
 	}
 
-	app := &watcher.App{Config: cfg}
-
-	
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		if err := app.Start(); err != nil {
-			log.Fatalf("Watcher failed: %v", err)
-		}
-	}()
-
-	<-sig
-	log.Println("Gracefully shutting down InotiTidy...")
+	// Default: Launch the TUI Management Console.
+	if err := handleTUI(); err != nil {
+		log.Fatalf("Critical TUI error: %v", err)
+	}
 }
