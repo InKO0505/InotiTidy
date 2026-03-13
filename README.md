@@ -11,6 +11,7 @@ It is designed to run as a `systemd` service and continuously scan watched folde
 In the current implementation, InotiTidy:
 
 - Uses a **polling watcher** (directory scan every ~1 second), not `inotify/fsnotify`.
+- Features an **Interactive Terminal UI (TUI)** (`inotitidy tui`) to safely manage configuration natively.
 - Waits until a file size becomes stable before moving it (helps avoid moving incomplete downloads/copies).
 - Ignores files containing configured exclude keywords (case-insensitive).
 - Routes files by extension rules using case-insensitive suffix matching (supports multi-part extensions like `.tar.gz`).
@@ -54,6 +55,28 @@ What this does:
 ---
 
 ## ⚙️ Configuration
+
+InotiTidy provides a built-in interactive Terminal User Interface (TUI) to easily manage your sorting rules, watch directories, and excluded keywords.
+
+To open the TUI configuration menu, simply run:
+
+```bash
+inotitidy tui
+# or
+inotitidy config
+```
+
+*Note: If `inotitidy` is not in your `PATH` or you installed via `make install`, use `~/.local/bin/inotitidy tui`.*
+
+Using the TUI, you can:
+- Add and remove directories to monitor.
+- Add ignore keywords to prevent moving specific files.
+- Create mapping rules (e.g. `[".png", ".jpg"] -> "~/Pictures"`).
+
+The configuration is saved natively to `~/.config/inotitidy/config.yaml`. 
+If you modify the configuration while the daemon is running, restart the systemd service to apply changes.
+
+### Manual Configuration (Optional)
 
 Config path:
 
