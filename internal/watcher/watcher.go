@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -67,17 +68,38 @@ func (a *App) LoadStats() {
 	}
 }
 
+func (a *App) ensureStatsLocked() {
+	if a.Stats == nil {
+		a.Stats = &Stats{ExtensionCounts: make(map[string]int)}
+	}
+	if a.Stats.ExtensionCounts == nil {
+		a.Stats.ExtensionCounts = make(map[string]int)
+	}
+	if a.Stats.LastResetDate == "" {
+		a.Stats.LastResetDate = time.Now().Format("2006-01-02")
+	}
+}
+
 func (a *App) SaveStats() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.ensureStatsLocked()
 
 	path := filepath.Join(config.GetConfigPath(), "..", "stats.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		a.log("Failed to create stats directory: %v", err)
+		return
+	}
+
 	data, _ := json.MarshalIndent(a.Stats, "", "  ")
-	_ = os.WriteFile(path, data, 0644)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		a.log("Failed to write stats: %v", err)
+	}
 }
 
 func (a *App) IncrementStats(ext string) {
 	a.mu.Lock()
+	a.ensureStatsLocked()
 	a.Stats.TotalSorted++
 	a.Stats.TodaySorted++
 	a.Stats.ExtensionCounts[strings.ToLower(ext)]++
@@ -163,6 +185,9 @@ func (a *App) handleEvent(path string) {
 		if err != nil {
 			return
 		}
+		if !stat.Mode().IsRegular() {
+			return
+		}
 		if stat.Size() == prevSize {
 			break
 		}
@@ -200,9 +225,40 @@ func (a *App) move(src, targetDir, name, ext string) {
 	}
 
 	if err := os.Rename(src, dest); err != nil {
-		a.log("Move error: %v", err)
+		if copyErr := moveFileWithCopyFallback(src, dest); copyErr != nil {
+			a.log("Move error: %v", copyErr)
+			return
+		}
+		a.log("Sorted: %s", name)
+		a.IncrementStats(ext)
 	} else {
 		a.log("Sorted: %s", name)
 		a.IncrementStats(ext)
 	}
+}
+
+func moveFileWithCopyFallback(src, dest string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dest)
+		return err
+	}
+
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dest)
+		return err
+	}
+
+	return os.Remove(src)
 }
