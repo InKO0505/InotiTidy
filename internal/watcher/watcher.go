@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"InotiTidy/internal/config"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -12,35 +13,52 @@ import (
 
 type App struct {
 	Config *config.Config
+	Logger func(string) // Custom logger for TUI feedback
 }
 
-func (a *App) Start() error {
+func (a *App) log(format string, v ...any) {
+	msg := fmt.Sprintf(format, v...)
+	if a.Logger != nil {
+		a.Logger(msg)
+	} else {
+		log.Println(msg)
+	}
+}
+
+func (a *App) Start(ctx context.Context) error {
 	seen := make(map[string]struct{})
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	log.Println("InotiTidy started successfully")
+	a.log("InotiTidy started successfully")
 	for {
-		for _, dir := range a.Config.WatchDirs {
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				log.Printf("Error reading %s: %v", dir, err)
-				continue
-			}
+		select {
+		case <-ctx.Done():
+			a.log("InotiTidy stopping...")
+			return nil
+		case <-ticker.C:
+			for _, dir := range a.Config.WatchDirs {
+				entries, err := os.ReadDir(dir)
+				if err != nil {
+					a.log("Error reading %s: %v", dir, err)
+					continue
+				}
 
-			for _, entry := range entries {
-				if entry.IsDir() {
-					continue
+				for _, entry := range entries {
+					if entry.IsDir() {
+						continue
+					}
+					path := filepath.Join(dir, entry.Name())
+					if _, ok := seen[path]; ok {
+						continue
+					}
+					seen[path] = struct{}{}
+					
+					// Run event handler in a goroutine to not block polling
+					go a.handleEvent(path)
 				}
-				path := filepath.Join(dir, entry.Name())
-				if _, ok := seen[path]; ok {
-					continue
-				}
-				seen[path] = struct{}{}
-				a.handleEvent(path)
 			}
 		}
-		<-ticker.C
 	}
 }
 
@@ -88,8 +106,8 @@ func (a *App) move(src, targetDir, name string) {
 	}
 
 	if err := os.Rename(src, dest); err != nil {
-		log.Printf("Move error: %v", err)
+		a.log("Move error: %v", err)
 	} else {
-		log.Printf("Sorted: %s", name)
+		a.log("Sorted: %s", name)
 	}
 }

@@ -1,113 +1,80 @@
 # ⚡ InotiTidy
 
-**InotiTidy** is a Linux daemon written in Go that automatically sorts files from selected folders (for example, `Downloads` and `Desktop`) into destination directories based on extension rules.
+**InotiTidy** is a modern file organizer for Linux. It combines a powerful background file sorter with a premium "Tokyo Night" themed Management Console. 
 
-It is designed to run as a `systemd` service and continuously scan watched folders at a short interval.
+With InotiTidy, you don't need to manually configure YAML files or manage complex `systemd` services — everything is handled directly from the terminal interface.
 
 ---
 
 ## 🌟 Features
 
-- **Polling Watcher**: Scans directories every ~1 second (no `inotify` overhead).
-- **Premium TUI**: A beautiful "Tokyo Night" themed terminal interface for configuration.
-- **2-Pane Layout**: Modern Sidebar + Content Area design for intuitive navigation.
-- **Stability Check**: Only moves files after they stop growing (safe for large downloads).
-- **Exclude Keywords**: Skip specific files using case-insensitive ignore lists.
-- **Extension Routing**: Map multi-part extensions (like `.tar.gz`) to target folders.
-- **Collision Safety**: Appends timestamps to filenames instead of overwriting existing files.
+- **Unified Management Console**: Start, stop, and monitor your file sorting service from a single dashboard.
+- **Live Activity Feed**: See real-time sorting events directly in the TUI window.
+- **Premium Tokyo Night Theme**: A beautiful, high-contrast terminal interface.
+- **Intelligent Sorting**: Moves files based on extensions only after they stop growing (safe for large downloads).
+- **Custom Filters**: Exclude files by keywords and map specific extensions to target folders.
+- **Conflict Management**: Automatically handles filename collisions by appending timestamps.
 
 ---
 
-## 🏗️ Project Structure
-
-- `cmd/inotitidy/main.go` — App entrypoint and lifecycle.
-- `cmd/inotitidy/tui.go` — Terminal UI implementation.
-- `internal/config` — Config management and parser.
-- `internal/watcher` — Core sorting logic and polling loop.
-- `install.sh` — Automated installation and systemd setup script.
-- `config.yaml` — Default template for the configuration file.
-
----
-
-## 🚀 Installation & Build
+## 🚀 Getting Started
 
 ### 1) Prerequisites
-- Linux with `systemd`
+- Linux
 - Go `1.21+`
-- `sudo` access (for service installation)
 
-### 2) Quick Install
-```bash
-sudo make install
-```
-This command builds the binary, moves it to `~/.local/bin/`, sets up the config directory, and starts the `systemd` service.
+### 2) Build & Launch
+To get the latest version of InotiTidy running:
 
-### 3) Manual Build
-To just compile the binary locally:
 ```bash
+# Build the project
 make build
-# or manual
-go build -o inotitidy ./cmd/inotitidy
+
+# Launch the Management Console
+./inotitidy
 ```
 
 ---
 
-## ⚙️ Configuration (TUI)
+## ⚙️ How to Use (TUI Console)
 
-InotiTidy features a professional Terminal User Interface to manage your settings without editing YAML manually.
+Once you launch `./inotitidy`, you'll enter the **Management Console**.
 
-### How to Launch the TUI
+### The Dashboard
+- **Start/Stop Service**: Use the buttons on the dashboard to control the background file monitor.
+- **Service Status**: Instantly see if the sorter is active (`RUNNING`) or inactive (`STOPPED`).
+- **Activity Log**: Watch the bottom pane for live feedback on files being moved.
 
-Depending on how you want to run it:
+### Configuration Sections
+- **Watch Directories**: Add/remove folders you want the app to monitor (e.g., `~/Downloads`).
+- **Exclude Keywords**: Define words that, if found in a filename, will cause it to be ignored.
+- **Routing Rules**: Map extensions (e.g., `.pdf`, `.jpg`) to destination folders.
 
-| Command | Description |
-| :--- | :--- |
-| `inotitidy tui` | Launch TUI from an installed binary (in your PATH). |
-| `go run ./cmd/inotitidy tui` | Launch TUI directly from source (development mode). |
-| `inotitidy config` | Alias for launching the TUI. |
-
-> [!IMPORTANT]
-> Running the command **without arguments** (i.e., just `inotitidy`) starts the **daemon** process, which runs in the background.
-
-### TUI Navigation
-- **Arrows (↑/↓)**: Navigate through lists in the active pane.
-- **Tab**: Switch focus between the **Sidebar** and the **Main Pane**.
-- **Enter**: Select an item or "focus" into a list to begin editing/removing.
-- **Esc**: Exit the current form or return focus to the Sidebar.
-- **Ctrl+C**: Abort and exit the application entirely.
+### Console Navigation
+- **Arrows (↑/↓)**: Navigate through lists and menus.
+- **Tab**: Switch focus between the **Sidebar** and the **Main Area**.
+- **Enter**: Confirm an action, edit a field, or "focus" into a list.
+- **Esc**: Return focus to the Sidebar or cancel a form.
+- **q / Ctrl+C**: Stop the service and exit the console.
 
 ---
 
-## 🧰 Service Management
+## 🧪 Development & Manual Build
 
-Since the installer creates a system service, you can manage the background daemon using standard tools:
-
+If you are working on the code, you can run the console directly from source:
 ```bash
-# Check if it's running
-sudo systemctl status inotitidy.service
-
-# Restart after making changes in TUI (required for daemon to reload config)
-sudo systemctl restart inotitidy.service
-
-# View live logs
-sudo journalctl -u inotitidy.service -f
+go run ./cmd/inotitidy
 ```
 
 ---
 
 ## 🔍 Troubleshooting
 
-### TUI doesn't open
-- Ensure you passed the `tui` argument.
-- If you just ran `go run ./cmd/inotitidy`, the daemon started instead. Kill it with `Ctrl+C` and use `go run ./cmd/inotitidy tui`.
+### Changes don't apply immediately?
+If you add new Watch Directories or Rules while the service is **RUNNING**, you should **Stop** and then **Start** the service again via the Dashboard to reload the new configuration.
 
-### Changes don't take effect
-- The TUI saves the config to `~/.config/inotitidy/config.yaml`.
-- The background daemon reads this file only on startup. **Always restart the service** after saving changes in the TUI:
-  `sudo systemctl restart inotitidy.service`
-
-### "Error reading <dir>"
-- Check that the paths added in the TUI actually exist. Use absolute paths where possible.
+### Where is the config file?
+InotiTidy saves all settings to `~/.config/inotitidy/config.yaml`. The TUI manages this file for you automatically.
 
 ---
 

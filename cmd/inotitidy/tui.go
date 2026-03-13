@@ -2,8 +2,11 @@ package main
 
 import (
 	"InotiTidy/internal/config"
+	"InotiTidy/internal/watcher"
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -45,7 +48,104 @@ func handleTUI() error {
 	sidebar.SetSelectedBackgroundColor(bgPanel).SetSelectedTextColor(cyanColor)
 	sidebar.SetMainTextColor(fgPrimary).SetSecondaryTextColor(fgSecondary)
 
+	// --- Log View ---
+	logView := tview.NewTextView().
+		SetDynamicColors(true).
+		SetRegions(true).
+		SetWordWrap(true).
+		SetChangedFunc(func() {
+			app.Draw()
+		})
+	logView.SetBorder(true).SetTitle(" [white::b]Live Activity Feed[-:-:-] ")
+	logView.SetBackgroundColor(tcell.NewHexColor(0x16161e))
+
+	logToUI := func(msg string) {
+		timestamp := time.Now().Format("15:04:05")
+		fmt.Fprintf(logView, "[#565f89]%s[-] %s\n", timestamp, msg)
+		logView.ScrollToEnd()
+	}
+
+	// --- Service Management ---
+	var cancelWatcher context.CancelFunc
+	var isRunning bool
+
+	updateDashboard := func() {
+		// This will be called to refresh the Dashboard content
+	}
+
+	startWatcher := func() {
+		if isRunning {
+			return
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelWatcher = cancel
+		isRunning = true
+
+		watcherApp := &watcher.App{
+			Config: cfg,
+			Logger: logToUI,
+		}
+
+		go func() {
+			if err := watcherApp.Start(ctx); err != nil {
+				logToUI(fmt.Sprintf("[red]Watcher Error: %v[-]", err))
+			}
+			isRunning = false
+			app.QueueUpdateDraw(func() {
+				updateDashboard()
+			})
+		}()
+		updateDashboard()
+		logToUI("[#9ece6a]Service started manually from TUI[-]")
+	}
+
+	stopWatcher := func() {
+		if !isRunning {
+			return
+		}
+		if cancelWatcher != nil {
+			cancelWatcher()
+		}
+		isRunning = false
+		updateDashboard()
+		logToUI("[#f7768e]Service stopped manually from TUI[-]")
+	}
+
+	// --- Page Constructors ---
 	var populateMainPages func()
+
+	createDashboard := func() *tview.Flex {
+		statusText := "[#f7768e]STOPPED[-]"
+		if isRunning {
+			statusText = "[#9ece6a]RUNNING[-]"
+		}
+
+		info := tview.NewTextView().
+			SetDynamicColors(true).
+			SetTextAlign(tview.AlignCenter).
+			SetText(fmt.Sprintf("\n[white::b]Service Status:[-] %s\n\n[#a9b1d6]Manage the background sorting process from here.[-]", statusText))
+
+		buttons := tview.NewFlex().
+			AddItem(tview.NewBox(), 0, 1, false).
+			AddItem(tview.NewButton("Start Service").SetSelectedFunc(startWatcher), 20, 1, !isRunning).
+			AddItem(tview.NewBox(), 2, 0, false).
+			AddItem(tview.NewButton("Stop Service").SetSelectedFunc(stopWatcher), 20, 1, isRunning).
+			AddItem(tview.NewBox(), 0, 1, false)
+
+		flex := tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(tview.NewBox(), 1, 0, false).
+			AddItem(info, 5, 1, false).
+			AddItem(buttons, 1, 1, true).
+			AddItem(tview.NewBox(), 2, 0, false).
+			AddItem(logView, 0, 2, false)
+
+		flex.SetBorder(true).SetTitle(" [white::b]Control Dashboard[-:-:-] ")
+		return flex
+	}
+
+	updateDashboard = func() {
+		mainPages.AddPage("Dashboard", createDashboard(), true, true)
+	}
 
 	createDirsList := func() *tview.List {
 		list := tview.NewList()
@@ -119,6 +219,7 @@ func handleTUI() error {
 		mainPages.AddPage("DirsList", createDirsList(), true, false)
 		mainPages.AddPage("ExcList", createExcList(), true, false)
 		mainPages.AddPage("RulesList", createRulesList(), true, false)
+		updateDashboard()
 	}
 
 	createAddDirForm := func() *tview.Form {
@@ -206,17 +307,14 @@ func handleTUI() error {
 	mainPages.AddPage("AddRuleForm", createAddRuleForm(), true, false)
 	populateMainPages()
 
-	welcome := tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignCenter).
-		SetText("\n\n\n\n\n[#7dcfff::b]Welcome to InotiTidy Configuration[-:-:-]\n\n[#a9b1d6]Select an option from the sidebar to begin.\n\nPress [#bb9af7]Enter[-:-:-] to focus the right pane.\nPress [#bb9af7]Esc[-:-:-] to return to the sidebar.")
-	welcome.SetBorder(true).SetTitle(" [white::b]Dashboard[-:-:-] ")
-	mainPages.AddPage("Welcome", welcome, true, true)
-
-	sidebar.AddItem("Watch Directories", "Monitor incoming files", '1', func() {
-		mainPages.SwitchToPage("DirsList")
+	sidebar.AddItem("Dashboard", "Control sorting service", 'd', func() {
+		mainPages.SwitchToPage("Dashboard")
 		app.SetFocus(mainPages)
 	}).
+		AddItem("Watch Directories", "Monitor incoming files", '1', func() {
+			mainPages.SwitchToPage("DirsList")
+			app.SetFocus(mainPages)
+		}).
 		AddItem("Exclude Keywords", "Skip files containing words", '2', func() {
 			mainPages.SwitchToPage("ExcList")
 			app.SetFocus(mainPages)
@@ -225,16 +323,17 @@ func handleTUI() error {
 			mainPages.SwitchToPage("RulesList")
 			app.SetFocus(mainPages)
 		}).
-		AddItem("Save & Exit", "Write to config.yaml and close", 's', func() {
+		AddItem("Save Config", "Write to config.yaml", 's', func() {
 			if err := cfg.Save(config.GetConfigPath()); err != nil {
-				app.Stop()
-				fmt.Printf("Failed to save config: %v\n", err)
+				logToUI(fmt.Sprintf("[red]Save Error: %v[-]", err))
 			} else {
-				app.Stop()
-				fmt.Println("Configuration saved successfully. Don't forget to restart: systemctl --user restart inotitidy")
+				logToUI("[#9ece6a]Configuration saved successfully![-]")
 			}
 		}).
-		AddItem("Quit", "Discard unsaved changes", 'q', func() { app.Stop() })
+		AddItem("Quit", "Stop service and exit", 'q', func() {
+			stopWatcher()
+			app.Stop()
+		})
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEsc {
@@ -255,12 +354,12 @@ func handleTUI() error {
 	header := tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft).
-		SetText("  [#bb9af7::b]⚡ InotiTidy[-:-:-] [#565f89]v1.0[-:-:-]")
+		SetText("  [#bb9af7::b]⚡ InotiTidy Management Console[-:-:-] [#565f89]v1.1[-:-:-]")
 
 	footer := tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignCenter).
-		SetText("[#a9b1d6]Navigate: [#7dcfff]\u2191\u2193/Arrows[#a9b1d6] \u2022 Focus: [#7dcfff]Enter/Tab[#a9b1d6] \u2022 Back: [#7dcfff]Esc[#a9b1d6] \u2022 Abort: [#7dcfff]Ctrl+C[-:-:-]")
+		SetText("[#a9b1d6]Navigate: [#7dcfff]\u2191\u2193[#a9b1d6] \u2022 Focus: [#7dcfff]Enter/Tab[#a9b1d6] \u2022 Back: [#7dcfff]Esc[#a9b1d6] \u2022 Exit: [#7dcfff]q/Ctrl+C[-:-:-]")
 
 	contentFlex := tview.NewFlex().
 		SetDirection(tview.FlexColumn).
@@ -281,6 +380,9 @@ func handleTUI() error {
 		AddItem(tview.NewBox(), 1, 0, false) // bottom margin
 
 	mainFlex.SetBackgroundColor(bgBody)
+
+	// Start by default?
+	startWatcher()
 
 	app.SetRoot(mainFlex, true).EnableMouse(true)
 	return app.Run()
