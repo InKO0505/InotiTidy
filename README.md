@@ -9,7 +9,12 @@ With InotiTidy, you don't need to manually configure YAML files or manage comple
 ## 🌟 Features
 
 - **Unified Management Console**: Start, stop, and monitor your file sorting service from a single dashboard.
-- **Live Activity Feed**: See real-time sorting events directly in the TUI window.
+- **Instant Event Watching**: Powered by `fsnotify` for immediate, low-CPU file detection.
+- **Advanced Management Console**: Unified dashboard for everything.
+- **Statistics Tracker**: Real-time counters for total files sorted, daily progress, and top extensions.
+- **Smart Directory Picker**: Browse and select folders visually—no more manual path typing.
+- **Bulk Cleanup**: A "Clean All Now" button to instantly sort all legacy files in watched folders.
+- **Persistent Stats**: Statistics are saved to `stats.json` and persist across restarts.
 - **Premium Tokyo Night Theme**: A beautiful, high-contrast terminal interface.
 - **Intelligent Sorting**: Moves files based on extensions only after they stop growing (safe for large downloads).
 - **Custom Filters**: Exclude files by keywords and map specific extensions to target folders.
