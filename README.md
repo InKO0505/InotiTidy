@@ -1,130 +1,95 @@
 # ⚡ InotiTidy
 
-**InotiTidy** is a Linux daemon written in Go that automatically sorts files from selected folders (for example, `Downloads` and `Desktop`) into destination directories by extension rules from config.
+**InotiTidy** is a Linux daemon written in Go that automatically sorts files from selected folders (for example, `Downloads` and `Desktop`) into destination directories based on extension rules.
 
-It is designed to run as a `systemd` service and continuously scan watched folders on a short interval.
-
----
-
-## 🌟 Current behavior (important)
-
-In the current implementation, InotiTidy:
-
-- Uses a **polling watcher** (directory scan every ~1 second), not `inotify/fsnotify`.
-- Features an **Interactive Terminal UI (TUI)** (`inotitidy tui`) to safely manage configuration natively.
-- Waits until a file size becomes stable before moving it (helps avoid moving incomplete downloads/copies).
-- Ignores files containing configured exclude keywords (case-insensitive).
-- Routes files by extension rules using case-insensitive suffix matching (supports multi-part extensions like `.tar.gz`).
-- Avoids overwrite conflicts by appending a Unix timestamp to the filename.
+It is designed to run as a `systemd` service and continuously scan watched folders at a short interval.
 
 ---
 
-## 🏗️ Project structure
+## 🌟 Features
 
-- `cmd/inotitidy/main.go` — app entrypoint, startup/shutdown lifecycle.
-- `internal/config` — config loading, `~` expansion, and built-in parser for supported config format.
-- `internal/watcher` — polling loop, stability check, filtering, and file move logic.
-- `install.sh` — install helper: build binary, place config, generate/restart `systemd` service.
-- `config.yaml` — default config template copied on first install.
+- **Polling Watcher**: Scans directories every ~1 second (no `inotify` overhead).
+- **Premium TUI**: A beautiful "Tokyo Night" themed terminal interface for configuration.
+- **2-Pane Layout**: Modern Sidebar + Content Area design for intuitive navigation.
+- **Stability Check**: Only moves files after they stop growing (safe for large downloads).
+- **Exclude Keywords**: Skip specific files using case-insensitive ignore lists.
+- **Extension Routing**: Map multi-part extensions (like `.tar.gz`) to target folders.
+- **Collision Safety**: Appends timestamps to filenames instead of overwriting existing files.
 
 ---
 
-## 🚀 Installation
+## 🏗️ Project Structure
 
-## 1) Prerequisites
+- `cmd/inotitidy/main.go` — App entrypoint and lifecycle.
+- `cmd/inotitidy/tui.go` — Terminal UI implementation.
+- `internal/config` — Config management and parser.
+- `internal/watcher` — Core sorting logic and polling loop.
+- `install.sh` — Automated installation and systemd setup script.
+- `config.yaml` — Default template for the configuration file.
 
+---
+
+## 🚀 Installation & Build
+
+### 1) Prerequisites
 - Linux with `systemd`
 - Go `1.21+`
-- `sudo` access for service installation into `/etc/systemd/system`
+- `sudo` access (for service installation)
 
-## 2) Install command
-
+### 2) Quick Install
 ```bash
 sudo make install
 ```
+This command builds the binary, moves it to `~/.local/bin/`, sets up the config directory, and starts the `systemd` service.
 
-What this does:
-
-1. Builds `inotitidy`.
-2. Detects target user (`SUDO_USER` fallback to `USER`) and uses that user home.
-3. Copies binary to `~/.local/bin/inotitidy` (for target user).
-4. Creates `~/.config/inotitidy/config.yaml` if missing.
-5. Writes system service file `/etc/systemd/system/inotitidy.service` with `User=<target-user>`.
-6. Runs `systemctl daemon-reload`, `enable`, and `restart` for `inotitidy.service`.
+### 3) Manual Build
+To just compile the binary locally:
+```bash
+make build
+# or manual
+go build -o inotitidy ./cmd/inotitidy
+```
 
 ---
 
-## ⚙️ Configuration
+## ⚙️ Configuration (TUI)
 
-InotiTidy provides a built-in interactive Terminal User Interface (TUI) to easily manage your sorting rules, watch directories, and excluded keywords.
+InotiTidy features a professional Terminal User Interface to manage your settings without editing YAML manually.
 
-To open the TUI configuration menu, simply run:
+### How to Launch the TUI
 
-```bash
-inotitidy tui
-# or
-inotitidy config
-```
+Depending on how you want to run it:
 
-*Note: If `inotitidy` is not in your `PATH` or you installed via `make install`, use `~/.local/bin/inotitidy tui`.*
+| Command | Description |
+| :--- | :--- |
+| `inotitidy tui` | Launch TUI from an installed binary (in your PATH). |
+| `go run ./cmd/inotitidy tui` | Launch TUI directly from source (development mode). |
+| `inotitidy config` | Alias for launching the TUI. |
 
-Using the TUI, you can:
-- Add and remove directories to monitor.
-- Add ignore keywords to prevent moving specific files.
-- Create mapping rules (e.g. `[".png", ".jpg"] -> "~/Pictures"`).
+> [!IMPORTANT]
+> Running the command **without arguments** (i.e., just `inotitidy`) starts the **daemon** process, which runs in the background.
 
-The configuration is saved natively to `~/.config/inotitidy/config.yaml`. 
-If you modify the configuration while the daemon is running, restart the systemd service to apply changes.
-
-### Manual Configuration (Optional)
-
-Config path:
-
-```text
-~/.config/inotitidy/config.yaml
-```
-
-Example (supported by current parser):
-
-```yaml
-watch_directories:
-  - "~/Downloads"
-  - "~/Desktop"
-
-exclude_keywords:
-  - "KEEP"
-  - "IMPORTANT"
-
-rules:
-  - extensions: [".pdf", ".doc", ".docx", ".txt"]
-    target: "~/Documents"
-
-  - extensions: [".jpg", ".jpeg", ".png", ".gif"]
-    target: "~/Pictures"
-
-  - extensions: [".mp3", ".wav", ".flac"]
-    target: "~/Music"
-
-  - extensions: [".zip", ".tar", ".gz", ".tar.gz", ".rar"]
-    target: "~/Downloads/Archives"
-```
-
-### Notes
-
-- `watch_directories` is required.
-- `~` in paths is expanded to current user home at runtime.
-- Rule extensions are matched by filename suffix, case-insensitive.
+### TUI Navigation
+- **Arrows (↑/↓)**: Navigate through lists in the active pane.
+- **Tab**: Switch focus between the **Sidebar** and the **Main Pane**.
+- **Enter**: Select an item or "focus" into a list to begin editing/removing.
+- **Esc**: Exit the current form or return focus to the Sidebar.
+- **Ctrl+C**: Abort and exit the application entirely.
 
 ---
 
-## 🧰 Service management
+## 🧰 Service Management
 
-Because installer creates a **system** service, use:
+Since the installer creates a system service, you can manage the background daemon using standard tools:
 
 ```bash
+# Check if it's running
 sudo systemctl status inotitidy.service
+
+# Restart after making changes in TUI (required for daemon to reload config)
 sudo systemctl restart inotitidy.service
-sudo systemctl stop inotitidy.service
+
+# View live logs
 sudo journalctl -u inotitidy.service -f
 ```
 
@@ -132,44 +97,21 @@ sudo journalctl -u inotitidy.service -f
 
 ## 🔍 Troubleshooting
 
-### Service logs show `/root/Downloads` or `/root/Desktop`
+### TUI doesn't open
+- Ensure you passed the `tui` argument.
+- If you just ran `go run ./cmd/inotitidy`, the daemon started instead. Kill it with `Ctrl+C` and use `go run ./cmd/inotitidy tui`.
 
-Usually this means the service runs as `root` or config points to root home.
+### Changes don't take effect
+- The TUI saves the config to `~/.config/inotitidy/config.yaml`.
+- The background daemon reads this file only on startup. **Always restart the service** after saving changes in the TUI:
+  `sudo systemctl restart inotitidy.service`
 
-Checklist:
-
-1. Reinstall using `sudo make install` from your normal user.
-2. Verify service user:
-   ```bash
-   systemctl cat inotitidy.service | grep '^User='
-   ```
-3. Verify config path/content for that same user:
-   ```bash
-   cat ~/.config/inotitidy/config.yaml
-   ```
-4. Restart service after config changes:
-   ```bash
-   sudo systemctl restart inotitidy.service
-   ```
-
-### "Error reading <dir>: no such file or directory"
-
-Create missing watch directories or update `watch_directories` in config.
-
----
-
-## 🧪 Local development
-
-```bash
-make build
-go test ./...
-```
+### "Error reading <dir>"
+- Check that the paths added in the TUI actually exist. Use absolute paths where possible.
 
 ---
 
 ## 🤝 Contributing
-
-1. Fork repository
-2. Create feature branch
-3. Commit changes
-4. Open PR
+1. Fork it.
+2. Create your feature branch.
+3. Open a Pull Request!
