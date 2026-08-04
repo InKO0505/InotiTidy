@@ -34,6 +34,22 @@ rules:
 	}
 }
 
+func TestPathHelpers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	wantDir := filepath.Join(home, ".config", "inotitidy")
+	if GetConfigDir() != wantDir {
+		t.Fatalf("GetConfigDir = %q, want %q", GetConfigDir(), wantDir)
+	}
+	if GetConfigPath() != filepath.Join(wantDir, "config.yaml") {
+		t.Fatalf("GetConfigPath = %q", GetConfigPath())
+	}
+	if GetStatsPath() != filepath.Join(wantDir, "stats.json") {
+		t.Fatalf("GetStatsPath = %q", GetStatsPath())
+	}
+}
+
 func TestSaveAndLoadFromPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

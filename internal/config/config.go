@@ -19,9 +19,21 @@ type Config struct {
 	Rules     []Rule   `yaml:"rules"`
 }
 
-func GetConfigPath() string {
+// GetConfigDir returns the directory that holds InotiTidy's config and state
+// (config.yaml, stats.json), i.e. ~/.config/inotitidy.
+func GetConfigDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config/inotitidy/config.yaml")
+	return filepath.Join(home, ".config", "inotitidy")
+}
+
+// GetConfigPath returns the full path to config.yaml.
+func GetConfigPath() string {
+	return filepath.Join(GetConfigDir(), "config.yaml")
+}
+
+// GetStatsPath returns the full path to the persisted stats file.
+func GetStatsPath() string {
+	return filepath.Join(GetConfigDir(), "stats.json")
 }
 
 func Load() (*Config, error) {

@@ -10,11 +10,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
+
+// listShortcut maps a list index to a digit hotkey (1-9). Indices beyond the
+// 9th get no shortcut (rune 0) instead of overflowing into ':', ';', etc.
+func listShortcut(i int) rune {
+	if i < 9 {
+		return rune('1' + i)
+	}
+	return 0
+}
 
 func handleTUI() error {
 	cfg, err := config.Load()
@@ -125,7 +135,22 @@ func handleTUI() error {
 		return fmt.Errorf("%s", strings.Join(errors, "; "))
 	}
 
-	var stopJournalOnce = func() {} // To be assigned later for log piping
+	// stopJournal cancels the current journalctl stream. It is assigned from the
+	// log-piping goroutine and read on quit, so access is guarded by a mutex to
+	// avoid a data race on the function value.
+	var journalMu sync.Mutex
+	stopJournal := func() {}
+	setStopJournal := func(fn func()) {
+		journalMu.Lock()
+		stopJournal = fn
+		journalMu.Unlock()
+	}
+	stopJournalOnce := func() {
+		journalMu.Lock()
+		fn := stopJournal
+		journalMu.Unlock()
+		fn()
+	}
 
 	// --- Dashboard Stats Refresh ---
 	var updateDashboard func()
@@ -182,11 +207,37 @@ func handleTUI() error {
 		}()
 	}
 
+	restartWatcher := func() {
+		go func() {
+			app.QueueUpdateDraw(func() {
+				logToUI("[yellow]Restarting systemd service...[-]")
+			})
+
+			if err := runWithElevation("systemctl", "restart", "inotitidy.service"); err != nil {
+				app.QueueUpdateDraw(func() {
+					logToUI(fmt.Sprintf("[red]Service failed to restart: %v[-]", err))
+					updateDashboard()
+				})
+				return
+			}
+
+			serviceActive := isServiceActive()
+			app.QueueUpdateDraw(func() {
+				if serviceActive {
+					logToUI("[#9ece6a]Service restarted successfully[-]")
+				} else {
+					logToUI("[yellow]Restart command ran, but service is not active. Check journal logs.[-]")
+				}
+				updateDashboard()
+			})
+		}()
+	}
+
 	// --- Log Piping (Journalctl) ---
 	go func() {
 		for {
 			ctx, cancel := context.WithCancel(context.Background())
-			stopJournalOnce = cancel
+			setStopJournal(cancel)
 
 			cmd := exec.CommandContext(ctx, "journalctl", "-u", "inotitidy.service", "-f", "-n", "20", "--no-hostname")
 			stdout, err := cmd.StdoutPipe()
@@ -227,19 +278,28 @@ func handleTUI() error {
 		exePath, _ := os.Executable()
 		absExePath, _ := filepath.Abs(exePath)
 
+		user := os.Getenv("USER")
+		if user == "" {
+			if u, err := os.UserHomeDir(); err == nil {
+				user = filepath.Base(u)
+			}
+		}
+
 		serviceContent := fmt.Sprintf(`[Unit]
 Description=InotiTidy File Organizer
-After=network.target
+After=local-fs.target
 
 [Service]
 Type=simple
+User=%s
+WorkingDirectory=%s
 ExecStart=%s --daemon
 Restart=always
-User=%s
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, absExePath, os.Getenv("USER"))
+`, user, config.GetConfigDir(), absExePath)
 
 		tmpPath := "/tmp/inotitidy.service"
 		if err := os.WriteFile(tmpPath, []byte(serviceContent), 0644); err != nil {
@@ -270,8 +330,16 @@ WantedBy=multi-user.target
 							return
 						}
 
+						if err := runWithElevation("systemctl", "enable", "inotitidy.service"); err != nil {
+							app.QueueUpdateDraw(func() {
+								logToUI(fmt.Sprintf("[yellow]Service installed but enable-on-boot failed: %v[-]", err))
+								updateDashboard()
+							})
+							return
+						}
+
 						app.QueueUpdateDraw(func() {
-							logToUI("[#9ece6a]Service installed and daemon reloaded successfully[-]")
+							logToUI("[#9ece6a]Service installed, enabled and daemon reloaded successfully[-]")
 							updateDashboard()
 						})
 					}()
@@ -285,7 +353,12 @@ WantedBy=multi-user.target
 
 	// --- Directory Picker Component ---
 	showDirPicker := func(onSelect func(string)) {
-		currentPath, _ := os.Getwd()
+		// Start browsing from the home directory — that is where users keep the
+		// folders they want to watch or route into, not the process's cwd.
+		currentPath, err := os.UserHomeDir()
+		if err != nil || currentPath == "" {
+			currentPath, _ = os.Getwd()
+		}
 		list := tview.NewList()
 
 		var updateList func(string)
@@ -371,16 +444,30 @@ WantedBy=multi-user.target
 		actions := tview.NewList().
 			AddItem("Start Service", "sudo systemctl start", '1', startWatcher).
 			AddItem("Stop Service", "sudo systemctl stop", '2', stopWatcher).
+			AddItem("Restart Service", "sudo systemctl restart", 'r', restartWatcher).
 			AddItem("Install/Setup Service", "Create inotitidy.service", 'i', installService).
 			AddItem("Clean All Now", "Process files manually in TUI", '3', func() {
 				go func() {
+					if isServiceActive() {
+						app.QueueUpdateDraw(func() {
+							logToUI("[yellow]Service is running; the daemon already sorts these folders. Skipping manual clean.[-]")
+						})
+						return
+					}
 					app.QueueUpdateDraw(func() {
 						logToUI("[#bb9af7]Manually triggered clean (Internal)...[-]")
 					})
 					w := &watcher.App{Config: cfg, Logger: func(msg string) {
 						app.QueueUpdateDraw(func() { logToUI(msg) })
 					}}
+					// Load existing stats first so counters accumulate instead of
+					// being overwritten from zero by this session's moves.
+					w.LoadStats()
 					w.ScanAll()
+					app.QueueUpdateDraw(func() {
+						logToUI("[#9ece6a]Manual clean finished.[-]")
+						updateDashboard()
+					})
 				}()
 			})
 		actions.SetSelectedBackgroundColor(bgPanel).SetSelectedTextColor(cyanColor)
@@ -389,7 +476,7 @@ WantedBy=multi-user.target
 		flex := tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(statsView, 3, 1, false).
 			AddItem(info, 4, 1, false).
-			AddItem(actions, 9, 1, true).
+			AddItem(actions, 11, 1, true).
 			AddItem(tview.NewBox(), 1, 0, false).
 			AddItem(logView, 0, 2, false)
 
@@ -410,7 +497,7 @@ WantedBy=multi-user.target
 
 		for i, dir := range cfg.WatchDirs {
 			idx := i
-			list.AddItem(dir, "Enter/Digit to remove", rune(49+i), func() {
+			list.AddItem(dir, "Enter/Digit to remove", listShortcut(i), func() {
 				cfg.WatchDirs = append(cfg.WatchDirs[:idx], cfg.WatchDirs[idx+1:]...)
 				populateMainPages()
 				mainPages.SwitchToPage("DirsList")
@@ -435,7 +522,7 @@ WantedBy=multi-user.target
 
 		for i, exc := range cfg.Excludes {
 			idx := i
-			list.AddItem(exc, "Enter/Digit to remove", rune(49+i), func() {
+			list.AddItem(exc, "Enter/Digit to remove", listShortcut(i), func() {
 				cfg.Excludes = append(cfg.Excludes[:idx], cfg.Excludes[idx+1:]...)
 				populateMainPages()
 				mainPages.SwitchToPage("ExcList")
@@ -457,7 +544,7 @@ WantedBy=multi-user.target
 		for i, rule := range cfg.Rules {
 			idx := i
 			exts := strings.Join(rule.Extensions, ", ")
-			list.AddItem(fmt.Sprintf("%s -> %s", exts, rule.Target), "Enter/Digit to remove", rune(49+i), func() {
+			list.AddItem(fmt.Sprintf("%s -> %s", exts, rule.Target), "Enter/Digit to remove", listShortcut(i), func() {
 				cfg.Rules = append(cfg.Rules[:idx], cfg.Rules[idx+1:]...)
 				populateMainPages()
 				mainPages.SwitchToPage("RulesList")

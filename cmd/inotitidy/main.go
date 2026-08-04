@@ -17,7 +17,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to load config for daemon: %v", err)
 		}
-		
+
 		w := &watcher.App{Config: cfg}
 		log.Println("InotiTidy starting in daemon mode...")
 		if err := w.Start(context.Background()); err != nil {

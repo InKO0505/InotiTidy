@@ -28,6 +28,31 @@ type App struct {
 	Logger func(string)
 	Stats  *Stats
 	mu     sync.Mutex
+
+	flightMu sync.Mutex
+	flight   map[string]struct{} // paths currently being processed
+}
+
+// claim marks a path as being processed. It returns false if another goroutine
+// is already handling that path, preventing duplicate work and races when
+// fsnotify and the initial scan target the same file.
+func (a *App) claim(path string) bool {
+	a.flightMu.Lock()
+	defer a.flightMu.Unlock()
+	if a.flight == nil {
+		a.flight = make(map[string]struct{})
+	}
+	if _, busy := a.flight[path]; busy {
+		return false
+	}
+	a.flight[path] = struct{}{}
+	return true
+}
+
+func (a *App) release(path string) {
+	a.flightMu.Lock()
+	defer a.flightMu.Unlock()
+	delete(a.flight, path)
 }
 
 func (a *App) log(format string, v ...any) {
@@ -43,7 +68,7 @@ func (a *App) LoadStats() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	path := filepath.Join(config.GetConfigPath(), "..", "stats.json")
+	path := config.GetStatsPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		a.Stats = &Stats{ExtensionCounts: make(map[string]int)}
@@ -85,7 +110,7 @@ func (a *App) SaveStats() {
 	defer a.mu.Unlock()
 	a.ensureStatsLocked()
 
-	path := filepath.Join(config.GetConfigPath(), "..", "stats.json")
+	path := config.GetStatsPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		a.log("Failed to create stats directory: %v", err)
 		return
@@ -159,8 +184,11 @@ func (a *App) Start(ctx context.Context) error {
 	}
 }
 
-// ScanAll performs a bulk sort of all files currently in watch directories
+// ScanAll performs a bulk sort of all files currently in watch directories.
+// It processes files concurrently but blocks until every file has been handled,
+// so callers can rely on stats being fully updated when it returns.
 func (a *App) ScanAll() {
+	var wg sync.WaitGroup
 	for _, dir := range a.Config.WatchDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -173,12 +201,23 @@ func (a *App) ScanAll() {
 				continue
 			}
 			path := filepath.Join(dir, entry.Name())
-			go a.handleEvent(path)
+			wg.Add(1)
+			go func(p string) {
+				defer wg.Done()
+				a.handleEvent(p)
+			}(path)
 		}
 	}
+	wg.Wait()
 }
 
 func (a *App) handleEvent(path string) {
+	// Skip if another goroutine is already processing this exact path.
+	if !a.claim(path) {
+		return
+	}
+	defer a.release(path)
+
 	var prevSize int64 = -1
 	for {
 		stat, err := os.Stat(path)
@@ -198,6 +237,11 @@ func (a *App) handleEvent(path string) {
 	fileName := filepath.Base(path)
 	upperName := strings.ToUpper(fileName)
 	for _, key := range a.Config.Excludes {
+		// An empty keyword would match every filename ("" is a substring of
+		// anything) and silently disable all sorting — skip it.
+		if key == "" {
+			continue
+		}
 		if strings.Contains(upperName, strings.ToUpper(key)) {
 			return
 		}
@@ -206,7 +250,7 @@ func (a *App) handleEvent(path string) {
 	lowerName := strings.ToLower(fileName)
 	for _, rule := range a.Config.Rules {
 		for _, e := range rule.Extensions {
-			if strings.HasSuffix(lowerName, strings.ToLower(e)) {
+			if matchesExtension(lowerName, e) {
 				ext := filepath.Ext(fileName)
 				a.move(path, rule.Target, fileName, ext)
 				return
@@ -215,25 +259,51 @@ func (a *App) handleEvent(path string) {
 	}
 }
 
+// matchesExtension reports whether a lowercased filename ends with the given
+// rule extension. The rule extension is normalized to start with a dot so that
+// "pdf" and ".pdf" behave identically and a bare "df" cannot match "report.pdf"
+// via a raw suffix check. Compound extensions like ".tar.gz" are still honored.
+func matchesExtension(lowerName, ext string) bool {
+	ext = strings.ToLower(strings.TrimSpace(ext))
+	if ext == "" || ext == "." {
+		return false
+	}
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	return strings.HasSuffix(lowerName, ext)
+}
+
 func (a *App) move(src, targetDir, name, ext string) {
 	_ = os.MkdirAll(targetDir, 0o755)
-	dest := filepath.Join(targetDir, name)
-
-	if _, err := os.Stat(dest); err == nil {
-		base := strings.TrimSuffix(name, ext)
-		dest = filepath.Join(targetDir, fmt.Sprintf("%s_%d%s", base, time.Now().Unix(), ext))
-	}
+	dest := uniqueDest(targetDir, name, ext)
 
 	if err := os.Rename(src, dest); err != nil {
 		if copyErr := moveFileWithCopyFallback(src, dest); copyErr != nil {
 			a.log("Move error: %v", copyErr)
 			return
 		}
-		a.log("Sorted: %s", name)
-		a.IncrementStats(ext)
-	} else {
-		a.log("Sorted: %s", name)
-		a.IncrementStats(ext)
+	}
+
+	a.log("Sorted: %s", filepath.Base(dest))
+	a.IncrementStats(ext)
+}
+
+// uniqueDest returns a destination path inside targetDir that does not yet
+// exist. If name is taken it appends _1, _2, … before the extension so files
+// are never silently overwritten.
+func uniqueDest(targetDir, name, ext string) string {
+	dest := filepath.Join(targetDir, name)
+	if _, err := os.Stat(dest); os.IsNotExist(err) {
+		return dest
+	}
+
+	base := strings.TrimSuffix(name, ext)
+	for i := 1; ; i++ {
+		candidate := filepath.Join(targetDir, fmt.Sprintf("%s_%d%s", base, i, ext))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
 	}
 }
 
