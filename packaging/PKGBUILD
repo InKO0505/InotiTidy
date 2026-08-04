@@ -1,0 +1,35 @@
+# Maintainer: InKO0505
+pkgname=inotitidy
+pkgver=2.0.0
+pkgrel=1
+pkgdesc="Event-driven file organizer for Linux with a Tokyo Night TUI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/InKO0505/InotiTidy"
+license=('MIT')
+depends=('systemd')
+makedepends=('go')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "InotiTidy-$pkgver"
+  export CGO_ENABLED=0
+  go build -o inotitidy \
+    -ldflags "-s -w -X main.version=$pkgver" \
+    ./cmd/inotitidy
+}
+
+check() {
+  cd "InotiTidy-$pkgver"
+  go test ./...
+}
+
+package() {
+  cd "InotiTidy-$pkgver"
+  install -Dm755 inotitidy "$pkgdir/usr/bin/inotitidy"
+  install -Dm644 config.yaml "$pkgdir/usr/share/inotitidy/config.yaml"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
+
+# After install, set up the per-user service (no root needed):
+#   inotitidy --install

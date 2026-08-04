@@ -1,20 +1,55 @@
-watch_directories:
-  - "~/Downloads"
-  - "~/Desktop"
+# InotiTidy configuration (v2 rules engine).
+#
+# A rule matches a file only when every condition you set passes. Available
+# conditions: extensions, name_glob, name_regex, min_size, max_size,
+# older_than, newer_than, by_content (match by MIME instead of name), exclude.
+# Actions: move | copy | trash. Conflict strategy: rename | skip | overwrite | trash.
+# Targets may use {year} {month} {day} {ext} templates.
+#
+# The legacy format (watch_directories / exclude_keywords / rules:[{extensions,target}])
+# is still accepted and upgraded automatically.
 
-exclude_keywords:
+version: 2
+
+# Optional: how long a file must stop growing before it is sorted (default 500ms).
+settle_interval: 500ms
+
+watch:
+  - path: "~/Downloads"
+  - path: "~/Desktop"
+
+# Files whose name contains any of these are never touched.
+global_exclude:
   - "KEEP"
   - "IMPORTANT"
-  - "DIPLOM"
 
 rules:
-  - extensions: [".pdf", ".doc", ".docx", ".txt"]
+  - name: Documents
+    extensions: [".pdf", ".doc", ".docx", ".txt"]
+    action: move
     target: "~/Documents"
-  - extensions: [".jpg", ".jpeg", ".png", ".gif"]
-    target: "~/Pictures"
-  - extensions: [".mp3", ".wav", ".flac"]
+    on_conflict: rename
+
+  - name: Pictures by year
+    extensions: [".jpg", ".jpeg", ".png", ".gif"]
+    action: move
+    target: "~/Pictures/{year}"
+
+  - name: Music
+    extensions: [".mp3", ".wav", ".flac"]
+    action: move
     target: "~/Music"
-  - extensions: [".mp4", ".mkv", ".mov"]
+
+  - name: Video
+    extensions: [".mp4", ".mkv", ".mov"]
+    action: move
     target: "~/Videos"
-  - extensions: [".zip", ".tar", ".gz", ".rar"]
+
+  - name: Archives
+    extensions: [".zip", ".tar", ".gz", ".rar"]
+    action: move
     target: "~/Downloads/Archives"
+
+  - name: Throw away temp files
+    name_glob: "*.tmp"
+    action: trash

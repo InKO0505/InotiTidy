@@ -1,0 +1,54 @@
+version: 2
+
+project_name: inotitidy
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: inotitidy
+    main: ./cmd/inotitidy
+    binary: inotitidy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    files:
+      - README.md
+      - config.yaml
+      - LICENSE*
+
+nfpms:
+  - id: packages
+    package_name: inotitidy
+    maintainer: InKO0505
+    description: Event-driven file organizer for Linux with a Tokyo Night TUI.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false

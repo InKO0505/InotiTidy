@@ -1,89 +1,143 @@
 # ⚡ InotiTidy
 
-**InotiTidy** is a modern file organizer for Linux. It combines a powerful background file sorter with a premium "Tokyo Night" themed Management Console. 
+**InotiTidy** is an event-driven file organizer for Linux. A low-CPU background
+daemon watches your folders and sorts files with a small **rules engine**
+(conditions → actions), and a premium *Tokyo Night* TUI lets you manage
+everything — rules, the service, previews and undo — from the terminal.
 
-With InotiTidy, you don't need to manually configure YAML files or manage complex `systemd` services — everything is handled directly from the terminal interface.
+No root required: the daemon runs as a **systemd `--user` service**.
 
 ---
 
 ## 🌟 Features
 
-- **Unified Management Console**: Start, stop, and monitor your file sorting service from a single dashboard.
-- **Instant Event Watching**: Powered by `fsnotify` for immediate, low-CPU file detection.
-- **Advanced Management Console**: Unified dashboard for everything.
-- **Statistics Tracker**: Real-time counters for total files sorted, daily progress, and top extensions.
-- **Smart Directory Picker**: Browse and select folders visually—no more manual path typing.
-- **Bulk Cleanup**: A "Clean All Now" button to instantly sort all legacy files in watched folders.
-- **Persistent Stats**: Statistics are saved to `stats.json` and persist across restarts.
-- **Premium Tokyo Night Theme**: A beautiful, high-contrast terminal interface.
-- **Intelligent Sorting**: Moves files based on extensions only after they stop growing (safe for large downloads).
-- **Custom Filters**: Exclude files by keywords and map specific extensions to target folders.
-- **Conflict Management**: Automatically handles filename collisions by appending timestamps.
+- **Rules engine** — match files by extension, glob, regex, size, age or MIME
+  type, then **move**, **copy** or **trash** them.
+- **Safe by design** — dry-run **preview**, an **undo** journal, a **trash**
+  action (freedesktop.org trash, not `rm`), and never-overwrite conflict handling.
+- **Date foldering** — target templates like `~/Pictures/{year}/{month}`.
+- **Hot reload** — the daemon re-reads `config.yaml` the moment you save it.
+- **No sudo** — installs and runs under `systemctl --user`.
+- **Unified TUI** — dashboard, live stats, service control, rule editor, preview
+  and log viewer, all keyboard-driven.
+- **Persistent stats** and per-day counters.
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Getting started
 
-### 1) Prerequisites
-- Linux
-- Go `1.21+`
+### Requirements
+- Linux with systemd
+- Go `1.24+` (to build from source)
 
-### 2) Build & Launch
-To get the latest version of InotiTidy running:
+### Install
 
 ```bash
-# Build the project
+make install          # builds, installs to ~/.local/bin, enables the user service
+```
+
+or manually:
+
+```bash
 make build
-
-# Launch the Management Console
-./inotitidy
+./inotitidy --install   # set up + enable the systemd --user service
+./inotitidy             # launch the TUI console
 ```
 
 ---
 
-## ⚙️ How to Use (TUI Console)
+## ⌨️ Command line
 
-Once you launch `./inotitidy`, you'll enter the **Management Console**.
-
-### The Dashboard
-- **Start/Stop Service**: Use the buttons on the dashboard to control the background file monitor.
-- **Service Status**: Instantly see if the sorter is active (`RUNNING`) or inactive (`STOPPED`).
-- **Activity Log**: Watch the bottom pane for live feedback on files being moved.
-
-### Configuration Sections
-- **Watch Directories**: Add/remove folders you want the app to monitor (e.g., `~/Downloads`).
-- **Exclude Keywords**: Define words that, if found in a filename, will cause it to be ignored.
-- **Routing Rules**: Map extensions (e.g., `.pdf`, `.jpg`) to destination folders.
-
-### Console Navigation
-- **Arrows (↑/↓)**: Navigate through lists and menus.
-- **Tab**: Switch focus between the **Sidebar** and the **Main Area**.
-- **Enter**: Confirm an action, edit a field, or "focus" into a list.
-- **Esc**: Return focus to the Sidebar or cancel a form.
-- **q / Ctrl+C**: Stop the service and exit the console.
-
----
-
-## 🧪 Development & Manual Build
-
-If you are working on the code, you can run the console directly from source:
 ```bash
-go run ./cmd/inotitidy
+inotitidy               # launch the TUI console
+inotitidy --daemon      # run the watcher in the foreground (used by systemd)
+inotitidy --scan        # sort existing files once, then exit
+inotitidy --dry-run     # print what would be sorted, change nothing
+inotitidy --undo        # reverse the most recent batch of moves
+inotitidy --install     # install & enable the systemd --user service
+inotitidy --version
+```
+
+Follow the daemon:
+
+```bash
+journalctl --user -u inotitidy.service -f
 ```
 
 ---
 
-## 🔍 Troubleshooting
+## ⚙️ Configuration
 
-### Changes don't apply immediately?
-If you add new Watch Directories or Rules while the service is **RUNNING**, you should **Stop** and then **Start** the service again via the Dashboard to reload the new configuration.
+Config lives at `~/.config/inotitidy/config.yaml` and is managed by the TUI, but
+it is plain YAML you can hand-edit. A rule matches only when **every** condition
+you set passes.
 
-### Where is the config file?
-InotiTidy saves all settings to `~/.config/inotitidy/config.yaml`. The TUI manages this file for you automatically.
+```yaml
+version: 2
+settle_interval: 500ms          # wait until a file stops growing
+
+watch:
+  - path: "~/Downloads"
+  - path: "~/Projects"
+    recursive: true
+
+global_exclude: ["KEEP", "IMPORTANT"]
+
+rules:
+  - name: Invoices
+    name_regex: "^INV-\\d+"
+    action: move
+    target: "~/Documents/Invoices"
+
+  - name: Photos by year
+    extensions: [jpg, jpeg, png]
+    action: move
+    target: "~/Pictures/{year}/{month}"
+
+  - name: Big videos
+    extensions: [mkv, mp4]
+    min_size: 200MB
+    action: move
+    target: "~/Videos"
+    on_conflict: skip
+
+  - name: Clean temp files
+    name_glob: "*.tmp"
+    older_than: 24h
+    action: trash
+```
+
+**Conditions:** `extensions`, `name_glob`, `name_regex`, `min_size`, `max_size`,
+`older_than`, `newer_than`, `by_content` (match extensions against the detected
+MIME type), `exclude`.
+**Actions:** `move`, `copy`, `trash`.
+**Conflict strategies:** `rename` (default), `skip`, `overwrite`, `trash`.
+**Target templates:** `{year}` `{month}` `{day}` `{ext}`.
+
+The old v1 format (`watch_directories`, `exclude_keywords`,
+`rules: [{extensions, target}]`) still loads and is upgraded automatically.
+
+---
+
+## 🖥️ TUI navigation
+
+- **↑/↓** move · **Enter** select/edit · **Tab** switch pane · **Esc** back
+- **a** add · **d** remove · **p** preview · **u** undo · **s** save · **q** quit
+- A **● unsaved** marker appears until you save; quitting asks to confirm.
+
+---
+
+## 🧪 Development
+
+```bash
+make race     # go test -race ./...
+make lint     # gofmt + vet + race tests
+make build VERSION=$(git describe --tags)
+```
 
 ---
 
 ## 🤝 Contributing
 1. Fork it.
 2. Create your feature branch.
-3. Open a Pull Request!
+3. Open a Pull Request.

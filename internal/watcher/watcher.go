@@ -1,41 +1,102 @@
+// Package watcher contains InotiTidy's file-sorting engine and the event-driven
+// daemon that drives it.
 package watcher
 
 import (
 	"InotiTidy/internal/config"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
 
-type Stats struct {
-	TotalSorted     int            `json:"total_sorted"`
-	TodaySorted     int            `json:"today_sorted"`
-	LastResetDate   string         `json:"last_reset_date"`
-	ExtensionCounts map[string]int `json:"extension_counts"`
-}
-
+// App is the sorting engine. A single App may run as a daemon (Start) or perform
+// one-shot scans (ScanAll). It is safe for concurrent file handling.
 type App struct {
-	Config *config.Config
+	// Logger, if set, receives every log line (used by the TUI). When nil, logs
+	// go to slog so systemd/journalctl captures them.
 	Logger func(string)
-	Stats  *Stats
-	mu     sync.Mutex
+
+	// DryRun makes the engine plan and log actions without touching files.
+	DryRun bool
+
+	cfgPtr  atomic.Pointer[config.Config]
+	stats   *statsStore
+	history *history
+	batchID string
 
 	flightMu sync.Mutex
-	flight   map[string]struct{} // paths currently being processed
+	flight   map[string]struct{}
 }
 
-// claim marks a path as being processed. It returns false if another goroutine
-// is already handling that path, preventing duplicate work and races when
-// fsnotify and the initial scan target the same file.
+// New builds an App with stats and history stores initialized.
+func New(cfg *config.Config) *App {
+	a := &App{
+		stats:   newStatsStore(),
+		history: newHistory(),
+		batchID: newBatchID(),
+	}
+	a.SetConfig(cfg)
+	return a
+}
+
+// Cfg returns the current configuration (safe under concurrent reload).
+func (a *App) Cfg() *config.Config { return a.cfgPtr.Load() }
+
+// SetConfig atomically swaps the active configuration, pre-compiling regexes.
+func (a *App) SetConfig(cfg *config.Config) {
+	if cfg != nil {
+		cfg.Compile()
+	}
+	a.cfgPtr.Store(cfg)
+}
+
+func newBatchID() string {
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+func (a *App) ensure() {
+	if a.stats == nil {
+		a.stats = newStatsStore()
+	}
+	if a.history == nil {
+		a.history = newHistory()
+	}
+	if a.batchID == "" {
+		a.batchID = newBatchID()
+	}
+	// Pre-compile rule regexes single-threaded before any concurrent matching.
+	if cfg := a.Cfg(); cfg != nil {
+		cfg.Compile()
+	}
+}
+
+func (a *App) log(format string, v ...any) {
+	msg := fmt.Sprintf(format, v...)
+	if a.Logger != nil {
+		a.Logger(msg)
+	} else {
+		slog.Info(msg)
+	}
+}
+
+// LoadStats loads persisted counters. Snapshot exposes them for display.
+func (a *App) LoadStats() { a.ensure(); a.stats.Load() }
+
+// Snapshot returns a copy of the current stats.
+func (a *App) Snapshot() Stats { a.ensure(); return a.stats.Snapshot() }
+
+// FlushStats forces any pending stats to disk.
+func (a *App) FlushStats() { a.ensure(); a.stats.Flush() }
+
+// claim ensures only one goroutine processes a given path at a time.
 func (a *App) claim(path string) bool {
 	a.flightMu.Lock()
 	defer a.flightMu.Unlock()
@@ -55,106 +116,28 @@ func (a *App) release(path string) {
 	delete(a.flight, path)
 }
 
-func (a *App) log(format string, v ...any) {
-	msg := fmt.Sprintf(format, v...)
-	if a.Logger != nil {
-		a.Logger(msg)
-	} else {
-		log.Println(msg)
-	}
-}
-
-func (a *App) LoadStats() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	path := config.GetStatsPath()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		a.Stats = &Stats{ExtensionCounts: make(map[string]int)}
-		return
-	}
-
-	var s Stats
-	if err := json.Unmarshal(data, &s); err != nil {
-		a.Stats = &Stats{ExtensionCounts: make(map[string]int)}
-		return
-	}
-	a.Stats = &s
-	if a.Stats.ExtensionCounts == nil {
-		a.Stats.ExtensionCounts = make(map[string]int)
-	}
-
-	// Reset daily stats if date changed
-	today := time.Now().Format("2006-01-02")
-	if a.Stats.LastResetDate != today {
-		a.Stats.TodaySorted = 0
-		a.Stats.LastResetDate = today
-	}
-}
-
-func (a *App) ensureStatsLocked() {
-	if a.Stats == nil {
-		a.Stats = &Stats{ExtensionCounts: make(map[string]int)}
-	}
-	if a.Stats.ExtensionCounts == nil {
-		a.Stats.ExtensionCounts = make(map[string]int)
-	}
-	if a.Stats.LastResetDate == "" {
-		a.Stats.LastResetDate = time.Now().Format("2006-01-02")
-	}
-}
-
-func (a *App) SaveStats() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.ensureStatsLocked()
-
-	path := config.GetStatsPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		a.log("Failed to create stats directory: %v", err)
-		return
-	}
-
-	data, _ := json.MarshalIndent(a.Stats, "", "  ")
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		a.log("Failed to write stats: %v", err)
-	}
-}
-
-func (a *App) IncrementStats(ext string) {
-	a.mu.Lock()
-	a.ensureStatsLocked()
-	a.Stats.TotalSorted++
-	a.Stats.TodaySorted++
-	a.Stats.ExtensionCounts[strings.ToLower(ext)]++
-	a.mu.Unlock()
-	a.SaveStats()
-}
-
+// Start runs the event-driven daemon until ctx is cancelled. It performs an
+// initial scan, watches all configured directories (recursively where asked),
+// and hot-reloads config.yaml when it changes.
 func (a *App) Start(ctx context.Context) error {
-	a.LoadStats()
+	a.ensure()
+	a.stats.Load()
 
-	watcher, err := fsnotify.NewWatcher()
+	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
 	}
-	defer watcher.Close()
+	defer fsw.Close()
 
-	// Initial Scan
 	a.log("Performing initial scan of watch directories...")
 	a.ScanAll()
 
-	// Add directories to watch
-	for _, dir := range a.Config.WatchDirs {
-		absPath, _ := filepath.Abs(dir)
-		err = watcher.Add(absPath)
-		if err != nil {
-			a.log("Error watching %s: %v", dir, err)
-		} else {
-			a.log("Watching: %s", dir)
-		}
-	}
+	a.addWatchDirs(fsw)
+	a.watchConfigFile(fsw)
+
+	// Periodic stats flush so bulk activity does not thrash the disk.
+	flush := time.NewTicker(2 * time.Second)
+	defer flush.Stop()
 
 	a.log("InotiTidy (Event-Driven) started successfully")
 
@@ -162,20 +145,17 @@ func (a *App) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			a.log("InotiTidy stopping...")
+			a.stats.Flush()
 			return nil
-		case event, ok := <-watcher.Events:
+		case <-flush.C:
+			a.stats.Flush()
+		case event, ok := <-fsw.Events:
 			if !ok {
+				a.stats.Flush()
 				return nil
 			}
-			// We only care about file creation or moves into the directory
-			if event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
-				// Small delay to let file system settle
-				go func(p string) {
-					time.Sleep(100 * time.Millisecond)
-					a.handleEvent(p)
-				}(event.Name)
-			}
-		case err, ok := <-watcher.Errors:
+			a.onFSEvent(fsw, event)
+		case err, ok := <-fsw.Errors:
 			if !ok {
 				return nil
 			}
@@ -184,151 +164,261 @@ func (a *App) Start(ctx context.Context) error {
 	}
 }
 
-// ScanAll performs a bulk sort of all files currently in watch directories.
-// It processes files concurrently but blocks until every file has been handled,
-// so callers can rely on stats being fully updated when it returns.
-func (a *App) ScanAll() {
-	var wg sync.WaitGroup
-	for _, dir := range a.Config.WatchDirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			a.log("Error scanning %s: %v", dir, err)
-			continue
-		}
-
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			path := filepath.Join(dir, entry.Name())
-			wg.Add(1)
-			go func(p string) {
-				defer wg.Done()
-				a.handleEvent(p)
-			}(path)
+func (a *App) addWatchDirs(fsw *fsnotify.Watcher) {
+	for _, w := range a.Cfg().Watch {
+		abs, _ := filepath.Abs(w.Path)
+		if w.Recursive {
+			a.addTree(fsw, abs)
+		} else if err := fsw.Add(abs); err != nil {
+			a.log("Error watching %s: %v", w.Path, err)
+		} else {
+			a.log("Watching: %s", w.Path)
 		}
 	}
-	wg.Wait()
 }
 
+func (a *App) addTree(fsw *fsnotify.Watcher, root string) {
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if aerr := fsw.Add(p); aerr != nil {
+				a.log("Error watching %s: %v", p, aerr)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		a.log("Error walking %s: %v", root, err)
+	} else {
+		a.log("Watching (recursive): %s", root)
+	}
+}
+
+func (a *App) watchConfigFile(fsw *fsnotify.Watcher) {
+	// Watch the config directory; edits usually replace the file, so watching
+	// the dir catches CREATE/RENAME as well as WRITE.
+	_ = fsw.Add(config.GetConfigDir())
+}
+
+func (a *App) onFSEvent(fsw *fsnotify.Watcher, event fsnotify.Event) {
+	// Config hot-reload.
+	if filepath.Clean(event.Name) == filepath.Clean(config.GetConfigPath()) {
+		if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
+			a.reloadConfig(fsw)
+		}
+		return
+	}
+
+	if !event.Has(fsnotify.Create) && !event.Has(fsnotify.Rename) {
+		return
+	}
+
+	// A newly created directory under a recursive root should be watched too.
+	if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+		if a.isUnderRecursiveRoot(event.Name) {
+			_ = fsw.Add(event.Name)
+			go a.handleTree(event.Name)
+		}
+		return
+	}
+
+	go func(p string) {
+		time.Sleep(100 * time.Millisecond)
+		a.handleEvent(p)
+	}(event.Name)
+}
+
+func (a *App) isUnderRecursiveRoot(path string) bool {
+	for _, w := range a.Cfg().Watch {
+		if !w.Recursive {
+			continue
+		}
+		root, _ := filepath.Abs(w.Path)
+		if abs, _ := filepath.Abs(path); abs == root || hasPrefixDir(abs, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPrefixDir(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !filepath.IsAbs(rel) && !startsWithDotDot(rel)
+}
+
+func startsWithDotDot(rel string) bool {
+	return rel == ".." || (len(rel) >= 3 && rel[0] == '.' && rel[1] == '.' && rel[2] == filepath.Separator)
+}
+
+func (a *App) handleTree(root string) {
+	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			a.handleEvent(p)
+		}
+		return nil
+	})
+}
+
+func (a *App) reloadConfig(fsw *fsnotify.Watcher) {
+	cfg, err := config.Load()
+	if err != nil {
+		a.log("Config reload skipped: %v", err)
+		return
+	}
+	a.SetConfig(cfg)
+	a.addWatchDirs(fsw)
+	a.log("Configuration reloaded")
+	a.ScanAll()
+}
+
+// ScanAll sorts every file currently in the watch directories. It processes
+// files concurrently but blocks until all are handled, then flushes stats.
+func (a *App) ScanAll() {
+	a.ensure()
+	var wg sync.WaitGroup
+	for _, w := range a.Cfg().Watch {
+		a.scanDir(w, &wg)
+	}
+	wg.Wait()
+	a.stats.Flush()
+}
+
+func (a *App) scanDir(w config.WatchDir, wg *sync.WaitGroup) {
+	walkFn := func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if !w.Recursive && path != cleanPath(w.Path) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			a.handleEvent(p)
+		}(path)
+		return nil
+	}
+
+	if w.Recursive {
+		if err := filepath.WalkDir(w.Path, walkFn); err != nil {
+			a.log("Error scanning %s: %v", w.Path, err)
+		}
+		return
+	}
+
+	entries, err := os.ReadDir(w.Path)
+	if err != nil {
+		a.log("Error scanning %s: %v", w.Path, err)
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(w.Path, entry.Name())
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			a.handleEvent(p)
+		}(path)
+	}
+}
+
+func cleanPath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	return abs
+}
+
+// PreviewAll returns the plan for every file that would be acted upon, without
+// changing anything. Used by dry-run mode in the CLI and TUI.
+func (a *App) PreviewAll() []Plan {
+	a.ensure()
+	var plans []Plan
+	for _, w := range a.Cfg().Watch {
+		walkFn := func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if !w.Recursive && path != cleanPath(w.Path) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if p := a.Evaluate(path, nil); p != nil {
+				plans = append(plans, *p)
+			}
+			return nil
+		}
+		if w.Recursive {
+			filepath.WalkDir(w.Path, walkFn)
+		} else {
+			entries, _ := os.ReadDir(w.Path)
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				path := filepath.Join(w.Path, e.Name())
+				if p := a.Evaluate(path, nil); p != nil {
+					plans = append(plans, *p)
+				}
+			}
+		}
+	}
+	return plans
+}
+
+// handleEvent waits for a file to stop changing, then evaluates and applies the
+// first matching rule.
 func (a *App) handleEvent(path string) {
-	// Skip if another goroutine is already processing this exact path.
 	if !a.claim(path) {
 		return
 	}
 	defer a.release(path)
 
+	info := a.settle(path)
+	if info == nil {
+		return
+	}
+
+	plan := a.Evaluate(path, info)
+	if plan == nil {
+		return
+	}
+	if plan.ruleIdx < 0 || plan.ruleIdx >= len(a.Cfg().Rules) {
+		return
+	}
+	a.Apply(plan, &a.Cfg().Rules[plan.ruleIdx])
+}
+
+// settle blocks until the file size is stable, returning its final FileInfo, or
+// nil if the file vanished or is not a regular file.
+func (a *App) settle(path string) os.FileInfo {
+	interval := a.Cfg().SettleInterval
+	if interval <= 0 {
+		interval = config.DefaultSettleInterval
+	}
 	var prevSize int64 = -1
 	for {
-		stat, err := os.Stat(path)
+		info, err := os.Stat(path)
 		if err != nil {
-			return
+			return nil
 		}
-		if !stat.Mode().IsRegular() {
-			return
+		if !info.Mode().IsRegular() {
+			return nil
 		}
-		if stat.Size() == prevSize {
-			break
+		if info.Size() == prevSize {
+			return info
 		}
-		prevSize = stat.Size()
-		time.Sleep(500 * time.Millisecond)
+		prevSize = info.Size()
+		time.Sleep(interval)
 	}
-
-	fileName := filepath.Base(path)
-	upperName := strings.ToUpper(fileName)
-	for _, key := range a.Config.Excludes {
-		// An empty keyword would match every filename ("" is a substring of
-		// anything) and silently disable all sorting — skip it.
-		if key == "" {
-			continue
-		}
-		if strings.Contains(upperName, strings.ToUpper(key)) {
-			return
-		}
-	}
-
-	lowerName := strings.ToLower(fileName)
-	for _, rule := range a.Config.Rules {
-		for _, e := range rule.Extensions {
-			if matchesExtension(lowerName, e) {
-				ext := filepath.Ext(fileName)
-				a.move(path, rule.Target, fileName, ext)
-				return
-			}
-		}
-	}
-}
-
-// matchesExtension reports whether a lowercased filename ends with the given
-// rule extension. The rule extension is normalized to start with a dot so that
-// "pdf" and ".pdf" behave identically and a bare "df" cannot match "report.pdf"
-// via a raw suffix check. Compound extensions like ".tar.gz" are still honored.
-func matchesExtension(lowerName, ext string) bool {
-	ext = strings.ToLower(strings.TrimSpace(ext))
-	if ext == "" || ext == "." {
-		return false
-	}
-	if !strings.HasPrefix(ext, ".") {
-		ext = "." + ext
-	}
-	return strings.HasSuffix(lowerName, ext)
-}
-
-func (a *App) move(src, targetDir, name, ext string) {
-	_ = os.MkdirAll(targetDir, 0o755)
-	dest := uniqueDest(targetDir, name, ext)
-
-	if err := os.Rename(src, dest); err != nil {
-		if copyErr := moveFileWithCopyFallback(src, dest); copyErr != nil {
-			a.log("Move error: %v", copyErr)
-			return
-		}
-	}
-
-	a.log("Sorted: %s", filepath.Base(dest))
-	a.IncrementStats(ext)
-}
-
-// uniqueDest returns a destination path inside targetDir that does not yet
-// exist. If name is taken it appends _1, _2, … before the extension so files
-// are never silently overwritten.
-func uniqueDest(targetDir, name, ext string) string {
-	dest := filepath.Join(targetDir, name)
-	if _, err := os.Stat(dest); os.IsNotExist(err) {
-		return dest
-	}
-
-	base := strings.TrimSuffix(name, ext)
-	for i := 1; ; i++ {
-		candidate := filepath.Join(targetDir, fmt.Sprintf("%s_%d%s", base, i, ext))
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate
-		}
-	}
-}
-
-func moveFileWithCopyFallback(src, dest string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		_ = os.Remove(dest)
-		return err
-	}
-
-	if err := out.Close(); err != nil {
-		_ = os.Remove(dest)
-		return err
-	}
-
-	return os.Remove(src)
 }
