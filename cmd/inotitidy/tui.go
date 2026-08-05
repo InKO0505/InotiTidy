@@ -53,6 +53,12 @@ type ui struct {
 
 	journalMu   sync.Mutex
 	stopJournal func()
+
+	// Service status is polled in the background so the UI thread never blocks
+	// on `systemctl`; refreshDashboard only reads this cache.
+	statusMu     sync.Mutex
+	svcActive    bool
+	svcInstalled bool
 }
 
 func applyTheme() {
@@ -70,6 +76,13 @@ func applyTheme() {
 }
 
 func handleTUI() error {
+	return buildUI().app.Run()
+}
+
+// buildUI constructs the whole TUI (widgets, pages, background goroutines) and
+// returns it ready to Run. Split out so tests can drive it on a simulation
+// screen.
+func buildUI() *ui {
 	cfg, err := config.Load()
 	if err != nil {
 		cfg = defaultConfig()
@@ -98,7 +111,7 @@ func handleTUI() error {
 	u.app.SetInputCapture(u.globalKeys)
 	u.app.SetRoot(u.rootPages, true).EnableMouse(true)
 	u.setPage("Dashboard")
-	return u.app.Run()
+	return u
 }
 
 func defaultConfig() *config.Config {
@@ -183,30 +196,34 @@ func (u *ui) buildDashboard() {
 	u.statsView = tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignCenter)
 	u.statusVw = tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignCenter)
 
-	actions := tview.NewList()
+	// Compact, single-line action list so the flexible log panel below always
+	// keeps room. (Descriptions moved into the labels.)
+	actions := tview.NewList().ShowSecondaryText(false)
 	actions.SetSelectedBackgroundColor(bgPanel).SetSelectedTextColor(cyanColor)
-	actions.SetMainTextColor(fgPrimary).SetSecondaryTextColor(fgSecondary)
+	actions.SetMainTextColor(fgPrimary)
 	actions.
-		AddItem("Start service", "systemctl --user start", '1', func() { u.serviceAction("start") }).
-		AddItem("Stop service", "systemctl --user stop", '2', func() { u.serviceAction("stop") }).
-		AddItem("Restart service", "reload config & restart", 'r', func() { u.serviceAction("restart") }).
-		AddItem("Install / enable service", "systemd --user, no sudo", 'i', u.installService).
-		AddItem("Scan now", "sort existing files once", '3', u.scanNow)
+		AddItem("Start service", "", '1', func() { u.serviceAction("start") }).
+		AddItem("Stop service", "", '2', func() { u.serviceAction("stop") }).
+		AddItem("Restart service (reload config)", "", 'r', func() { u.serviceAction("restart") }).
+		AddItem("Install / enable service", "", 'i', u.installService).
+		AddItem("Scan now", "", '3', u.scanNow)
 
+	// Fixed rows kept small (2+3+5 = 10) so the log panel gets the remaining
+	// height instead of being starved to zero on normal-size terminals.
 	flex := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(u.statsView, 3, 0, false).
-		AddItem(u.statusVw, 4, 0, false).
-		AddItem(actions, 11, 0, true).
-		AddItem(tview.NewBox(), 1, 0, false).
-		AddItem(u.logView, 0, 2, false)
+		AddItem(u.statsView, 2, 0, false).
+		AddItem(u.statusVw, 3, 0, false).
+		AddItem(actions, 5, 0, true).
+		AddItem(u.logView, 0, 1, false)
 	flex.SetBorder(true).SetTitle(" [white::b]Control Dashboard[-:-:-] ")
 
 	u.mainPages.AddPage("Dashboard", flex, true, false)
 	u.refreshDashboard()
 }
 
+// refreshDashboard renders the cached state. It is cheap and must only run on
+// the UI goroutine — no exec, no blocking I/O here.
 func (u *ui) refreshDashboard() {
-	u.engine.LoadStats()
 	s := u.engine.Snapshot()
 
 	top, max := "N/A", 0
@@ -219,10 +236,14 @@ func (u *ui) refreshDashboard() {
 		"\n[white::b]Total:[-] [#bb9af7]%d[-]    [white::b]Today:[-] [#9ece6a]%d[-]    [white::b]Top type:[-] [#7dcfff]%s[-]",
 		s.TotalSorted, s.TodaySorted, top))
 
+	u.statusMu.Lock()
+	active, installed := u.svcActive, u.svcInstalled
+	u.statusMu.Unlock()
+
 	status := "[" + redColor + "]STOPPED[-]"
-	if service.IsActive() {
+	if active {
 		status = "[" + greenColor + "]RUNNING[-]"
-	} else if !service.Installed() {
+	} else if !installed {
 		status = "[" + yellowColor + "]NOT INSTALLED[-]"
 	}
 	u.statusVw.SetText(fmt.Sprintf(
@@ -230,12 +251,27 @@ func (u *ui) refreshDashboard() {
 		status, len(u.cfg.Watch), len(u.cfg.Rules)))
 }
 
+// pollStatus refreshes the service status and stats off the UI thread, then
+// queues a cheap redraw.
+func (u *ui) pollStatus() {
+	active := service.IsActive()
+	installed := service.Installed()
+	u.engine.LoadStats()
+
+	u.statusMu.Lock()
+	u.svcActive, u.svcInstalled = active, installed
+	u.statusMu.Unlock()
+
+	u.app.QueueUpdateDraw(u.refreshDashboard)
+}
+
 func (u *ui) startLiveRefresh() {
 	go func() {
+		u.pollStatus()
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
 		for range t.C {
-			u.app.QueueUpdateDraw(u.refreshDashboard)
+			u.pollStatus()
 		}
 	}()
 }
@@ -259,7 +295,7 @@ func (u *ui) serviceAction(kind string) {
 		} else {
 			u.logUI("["+greenColor+"]%s ok[-]", kind)
 		}
-		u.app.QueueUpdateDraw(u.refreshDashboard)
+		u.pollStatus()
 	}()
 }
 
@@ -278,7 +314,7 @@ func (u *ui) installService() {
 				return
 			}
 			u.logUI("[" + greenColor + "]Service installed and enabled[-]")
-			u.app.QueueUpdateDraw(u.refreshDashboard)
+			u.pollStatus()
 		}()
 	})
 }
@@ -294,7 +330,7 @@ func (u *ui) scanNow() {
 		u.engine.LoadStats()
 		u.engine.ScanAll()
 		u.logUI("[" + greenColor + "]Scan finished[-]")
-		u.app.QueueUpdateDraw(u.refreshDashboard)
+		u.pollStatus()
 	}()
 }
 
@@ -376,7 +412,26 @@ func (u *ui) setPage(name string) {
 	}
 }
 
+// modalOpen reports whether a form, picker or modal is on top. While one is
+// open the global Tab/Esc shortcuts must yield to it, otherwise Tab would jump
+// focus out of the form (e.g. right after choosing an Action) instead of moving
+// to the next field.
+func (u *ui) modalOpen() bool {
+	if name, _ := u.rootPages.GetFrontPage(); name != "Main" {
+		return true
+	}
+	switch name, _ := u.mainPages.GetFrontPage(); name {
+	case "RuleForm", "RuleFormAdv", "Form", "Picker":
+		return true
+	}
+	return false
+}
+
 func (u *ui) globalKeys(event *tcell.EventKey) *tcell.EventKey {
+	// Let forms/pickers/modals handle their own Tab and Esc navigation.
+	if u.modalOpen() {
+		return event
+	}
 	switch event.Key() {
 	case tcell.KeyEsc:
 		u.app.SetFocus(u.sidebar)

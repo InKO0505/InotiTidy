@@ -193,109 +193,173 @@ func (u *ui) showTextForm(title, label, initial string, onSave func(string)) {
 	u.app.SetFocus(form)
 }
 
-func (u *ui) showRuleForm(idx int) {
-	var r config.Rule
-	title := "Add Rule"
-	if idx >= 0 && idx < len(u.cfg.Rules) {
-		r = u.cfg.Rules[idx]
-		title = "Edit Rule"
-	} else {
-		r.Action = config.ActionMove
-		r.OnConflict = config.ConflictRename
-	}
-
-	form := tview.NewForm()
-	form.SetBorder(true).SetTitle(" [white::b]" + title + "[-:-:-] ")
-	form.SetButtonBackgroundColor(bgPanel).SetButtonTextColor(cyanColor)
-	form.SetFieldBackgroundColor(bgPanel).SetFieldTextColor(fgPrimary)
-
-	actions := []string{config.ActionMove, config.ActionCopy, config.ActionTrash}
-	conflicts := []string{config.ConflictRename, config.ConflictSkip, config.ConflictOverwrite, config.ConflictTrash}
-
-	form.AddInputField("Name", r.Name, 40, nil, nil)
-	form.AddInputField("Extensions (comma)", strings.Join(r.Extensions, ", "), 40, nil, nil)
-	form.AddInputField("Name glob", r.NameGlob, 40, nil, nil)
-	form.AddInputField("Name regex", r.NameRegex, 40, nil, nil)
-	form.AddInputField("Min size", sizeStr(r.MinSize), 20, nil, nil)
-	form.AddInputField("Max size", sizeStr(r.MaxSize), 20, nil, nil)
-	form.AddInputField("Older than", durStr(r.OlderThan), 20, nil, nil)
-	form.AddInputField("Exclude (comma)", strings.Join(r.Exclude, ", "), 40, nil, nil)
-	form.AddDropDown("Action", actions, indexOf(actions, r.Action), nil)
-	form.AddInputField("Target", r.Target, 40, nil, nil)
-	form.AddDropDown("On conflict", conflicts, indexOf(conflicts, r.OnConflict), nil)
-
-	get := func(label string) string {
-		return strings.TrimSpace(form.GetFormItemByLabel(label).(*tview.InputField).GetText())
-	}
-	dropdown := func(label string) string {
-		_, opt := form.GetFormItemByLabel(label).(*tview.DropDown).GetCurrentOption()
-		return opt
-	}
-	close := func() { u.mainPages.RemovePage("RuleForm"); u.app.SetFocus(u.mainPages) }
-
-	form.AddButton("Browse target", func() {
-		u.showDirPicker(func(path string) {
-			form.GetFormItemByLabel("Target").(*tview.InputField).SetText(path)
-			u.app.SetFocus(form)
-		})
-	})
-	form.AddButton("Save", func() {
-		nr, err := buildRule(get, dropdown)
-		if err != nil {
-			u.notify("Invalid rule: " + err.Error())
-			return
-		}
-		if idx >= 0 && idx < len(u.cfg.Rules) {
-			u.cfg.Rules[idx] = nr
-		} else {
-			u.cfg.Rules = append(u.cfg.Rules, nr)
-		}
-		u.markDirty()
-		close()
-		u.rebuildEditors()
-		u.setPage("RulesList")
-	})
-	form.AddButton("Cancel", func() {
-		close()
-		u.setPage("RulesList")
-	})
-
-	u.mainPages.AddPage("RuleForm", modalFlex(form, 66, 26), true, true)
-	u.app.SetFocus(form)
+// ruleDraft holds an in-progress rule as raw strings, shared between the basic
+// and advanced edit screens so nothing is lost when switching between them.
+type ruleDraft struct {
+	name, exts, target, action                                   string
+	glob, regex, minSize, maxSize, olderThan, newerThan, exclude string
+	onConflict                                                   string
+	byContent                                                    bool
 }
 
-// buildRule assembles and validates a rule from form getters.
-func buildRule(get func(string) string, dropdown func(string) string) (config.Rule, error) {
+func draftFromRule(r config.Rule) *ruleDraft {
+	return &ruleDraft{
+		name:       r.Name,
+		exts:       strings.Join(r.Extensions, ", "),
+		target:     r.Target,
+		action:     r.Action,
+		glob:       r.NameGlob,
+		regex:      r.NameRegex,
+		minSize:    sizeStr(r.MinSize),
+		maxSize:    sizeStr(r.MaxSize),
+		olderThan:  durStr(r.OlderThan),
+		newerThan:  durStr(r.NewerThan),
+		exclude:    strings.Join(r.Exclude, ", "),
+		onConflict: r.OnConflict,
+		byContent:  r.ByContent,
+	}
+}
+
+// toRule turns a draft into a validated config.Rule.
+func (d *ruleDraft) toRule() (config.Rule, error) {
 	r := config.Rule{
-		Name:       get("Name"),
-		Extensions: normExts(get("Extensions (comma)")),
-		NameGlob:   get("Name glob"),
-		NameRegex:  get("Name regex"),
-		Exclude:    splitComma(get("Exclude (comma)")),
-		Action:     dropdown("Action"),
-		Target:     get("Target"),
-		OnConflict: dropdown("On conflict"),
+		Name:       strings.TrimSpace(d.name),
+		Extensions: normExts(d.exts),
+		NameGlob:   strings.TrimSpace(d.glob),
+		NameRegex:  strings.TrimSpace(d.regex),
+		Exclude:    splitComma(d.exclude),
+		ByContent:  d.byContent,
+		Action:     orDefault(d.action, config.ActionMove),
+		Target:     strings.TrimSpace(d.target),
+		OnConflict: orDefault(d.onConflict, config.ConflictRename),
 	}
 	var err error
-	if r.MinSize, err = config.ParseSize(get("Min size")); err != nil {
+	if r.MinSize, err = config.ParseSize(strings.TrimSpace(d.minSize)); err != nil {
 		return r, err
 	}
-	if r.MaxSize, err = config.ParseSize(get("Max size")); err != nil {
+	if r.MaxSize, err = config.ParseSize(strings.TrimSpace(d.maxSize)); err != nil {
 		return r, err
 	}
-	if s := get("Older than"); s != "" {
-		d, derr := time.ParseDuration(s)
-		if derr != nil {
-			return r, fmt.Errorf("older than: %v", derr)
-		}
-		r.OlderThan = d
+	if r.OlderThan, err = parseDur(d.olderThan, "older than"); err != nil {
+		return r, err
 	}
-
+	if r.NewerThan, err = parseDur(d.newerThan, "newer than"); err != nil {
+		return r, err
+	}
 	tmp := config.Config{Watch: []config.WatchDir{{Path: "/"}}, Rules: []config.Rule{r}}
 	if verr := tmp.Validate(); verr != nil {
 		return r, verr
 	}
 	return r, nil
+}
+
+func (u *ui) showRuleForm(idx int) {
+	var d *ruleDraft
+	title := "Add Rule"
+	if idx >= 0 && idx < len(u.cfg.Rules) {
+		d = draftFromRule(u.cfg.Rules[idx])
+		title = "Edit Rule"
+	} else {
+		d = &ruleDraft{action: config.ActionMove, onConflict: config.ConflictRename}
+	}
+	u.showRuleBasic(idx, title, d)
+}
+
+// showRuleBasic shows only the everyday fields: name, extensions, action, target.
+// Everything else lives behind "Advanced filters".
+func (u *ui) showRuleBasic(idx int, title string, d *ruleDraft) {
+	form := styledForm(title)
+	actions := []string{config.ActionMove, config.ActionCopy, config.ActionTrash}
+
+	form.AddInputField("Name", d.name, 40, nil, nil)
+	form.AddInputField("Extensions (comma)", d.exts, 40, nil, nil)
+	form.AddDropDown("Action", actions, indexOf(actions, d.action), nil)
+	form.AddInputField("Target folder", d.target, 40, nil, nil)
+
+	capture := func() {
+		d.name = getInput(form, "Name")
+		d.exts = getInput(form, "Extensions (comma)")
+		_, d.action = form.GetFormItemByLabel("Action").(*tview.DropDown).GetCurrentOption()
+		d.target = getInput(form, "Target folder")
+	}
+	closeForm := func() { u.mainPages.RemovePage("RuleForm"); u.app.SetFocus(u.mainPages) }
+
+	form.AddButton("Browse target", func() {
+		u.showDirPicker(func(path string) {
+			form.GetFormItemByLabel("Target folder").(*tview.InputField).SetText(path)
+			u.mainPages.SwitchToPage("RuleForm")
+			u.app.SetFocus(form)
+		})
+	})
+	form.AddButton("Advanced...", func() {
+		capture()
+		u.showRuleAdvanced(idx, title, d)
+	})
+	form.AddButton("Save", func() {
+		capture()
+		r, err := d.toRule()
+		if err != nil {
+			u.notify("Invalid rule: " + err.Error())
+			return
+		}
+		if idx >= 0 && idx < len(u.cfg.Rules) {
+			u.cfg.Rules[idx] = r
+		} else {
+			u.cfg.Rules = append(u.cfg.Rules, r)
+		}
+		u.markDirty()
+		closeForm()
+		u.rebuildEditors()
+		u.setPage("RulesList")
+	})
+	form.AddButton("Cancel", func() {
+		closeForm()
+		u.setPage("RulesList")
+	})
+
+	u.mainPages.AddPage("RuleForm", modalFlex(form, 62, 15), true, true)
+	u.mainPages.SwitchToPage("RuleForm")
+	u.app.SetFocus(form)
+	u.setFooter("[#7dcfff]Tab[-] next field  [#7dcfff]Enter[-] open/confirm  ·  Advanced for size/age/regex filters")
+}
+
+// showRuleAdvanced holds the power-user conditions, hidden by default.
+func (u *ui) showRuleAdvanced(idx int, title string, d *ruleDraft) {
+	form := styledForm("Advanced filters (optional)")
+	conflicts := []string{config.ConflictRename, config.ConflictSkip, config.ConflictOverwrite, config.ConflictTrash}
+
+	form.AddInputField("Name glob", d.glob, 40, nil, nil)
+	form.AddInputField("Name regex", d.regex, 40, nil, nil)
+	form.AddCheckbox("Match by content (MIME)", d.byContent, nil)
+	form.AddInputField("Min size", d.minSize, 20, nil, nil)
+	form.AddInputField("Max size", d.maxSize, 20, nil, nil)
+	form.AddInputField("Older than", d.olderThan, 20, nil, nil)
+	form.AddInputField("Newer than", d.newerThan, 20, nil, nil)
+	form.AddInputField("Exclude (comma)", d.exclude, 40, nil, nil)
+	form.AddDropDown("On conflict", conflicts, indexOf(conflicts, d.onConflict), nil)
+
+	capture := func() {
+		d.glob = getInput(form, "Name glob")
+		d.regex = getInput(form, "Name regex")
+		d.byContent = form.GetFormItemByLabel("Match by content (MIME)").(*tview.Checkbox).IsChecked()
+		d.minSize = getInput(form, "Min size")
+		d.maxSize = getInput(form, "Max size")
+		d.olderThan = getInput(form, "Older than")
+		d.newerThan = getInput(form, "Newer than")
+		d.exclude = getInput(form, "Exclude (comma)")
+		_, d.onConflict = form.GetFormItemByLabel("On conflict").(*tview.DropDown).GetCurrentOption()
+	}
+	back := func() {
+		capture()
+		u.mainPages.RemovePage("RuleFormAdv")
+		u.showRuleBasic(idx, title, d)
+	}
+	form.AddButton("Back", back)
+
+	u.mainPages.AddPage("RuleFormAdv", modalFlex(form, 62, 24), true, true)
+	u.mainPages.SwitchToPage("RuleFormAdv")
+	u.app.SetFocus(form)
+	u.setFooter("[#7dcfff]Tab[-] next field  ·  leave blank to ignore a filter  ·  Back to return")
 }
 
 // ---- directory picker ------------------------------------------------------
@@ -383,7 +447,7 @@ func (u *ui) undoLast() {
 				return
 			}
 			u.logUI("["+greenColor+"]Undid %d operation(s)[-]", n)
-			u.app.QueueUpdateDraw(u.refreshDashboard)
+			u.pollStatus()
 		}()
 	})
 }
@@ -459,6 +523,36 @@ func splitComma(csv string) []string {
 		return nil
 	}
 	return out
+}
+
+func styledForm(title string) *tview.Form {
+	form := tview.NewForm()
+	form.SetBorder(true).SetTitle(" [white::b]" + title + "[-:-:-] ")
+	form.SetButtonBackgroundColor(bgPanel).SetButtonTextColor(cyanColor)
+	form.SetFieldBackgroundColor(bgPanel).SetFieldTextColor(fgPrimary)
+	return form
+}
+
+func getInput(form *tview.Form, label string) string {
+	return strings.TrimSpace(form.GetFormItemByLabel(label).(*tview.InputField).GetText())
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func parseDur(s, label string) (time.Duration, error) {
+	if s = strings.TrimSpace(s); s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %v", label, err)
+	}
+	return d, nil
 }
 
 func indexOf(opts []string, v string) int {
