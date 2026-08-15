@@ -196,7 +196,7 @@ func parse(data []byte) (*Config, error) {
 	// Watch dirs: new format, else upgrade legacy watch_directories.
 	for _, w := range raw.Watch {
 		if w.Path != "" {
-			cfg.Watch = append(cfg.Watch, WatchDir{Path: w.Path, Recursive: w.Recursive})
+			cfg.Watch = append(cfg.Watch, WatchDir(w))
 		}
 	}
 	for _, p := range raw.WatchDirectories {
