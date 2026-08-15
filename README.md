@@ -2,8 +2,8 @@
 
 **InotiTidy** is an event-driven file organizer for Linux. A low-CPU background
 daemon watches your folders and sorts files with a small **rules engine**
-(conditions → actions), and a premium *Tokyo Night* TUI lets you manage
-everything — rules, the service, previews and undo — from the terminal.
+(conditions, then actions), and a premium *Tokyo Night* TUI lets you manage
+everything: rules, the service, previews and undo, all from the terminal.
 
 No root required: the daemon runs as a **systemd `--user` service**.
 
@@ -11,14 +11,14 @@ No root required: the daemon runs as a **systemd `--user` service**.
 
 ## 🌟 Features
 
-- **Rules engine** — match files by extension, glob, regex, size, age or MIME
+- **Rules engine**: match files by extension, glob, regex, size, age or MIME
   type, then **move**, **copy** or **trash** them.
-- **Safe by design** — dry-run **preview**, an **undo** journal, a **trash**
+- **Safe by design**: dry-run **preview**, an **undo** journal, a **trash**
   action (freedesktop.org trash, not `rm`), and never-overwrite conflict handling.
-- **Date foldering** — target templates like `~/Pictures/{year}/{month}`.
-- **Hot reload** — the daemon re-reads `config.yaml` the moment you save it.
-- **No sudo** — installs and runs under `systemctl --user`.
-- **Unified TUI** — dashboard, live stats, service control, rule editor, preview
+- **Date foldering**: target templates like `~/Pictures/{year}/{month}`.
+- **Hot reload**: the daemon re-reads `config.yaml` the moment you save it.
+- **No sudo**: installs and runs under `systemctl --user`.
+- **Unified TUI**: dashboard, live stats, service control, rule editor, preview
   and log viewer, all keyboard-driven.
 - **Persistent stats** and per-day counters.
 
